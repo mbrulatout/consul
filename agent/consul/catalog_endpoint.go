@@ -120,6 +120,7 @@ func (c *Catalog) Register(args *structs.RegisterRequest, reply *struct{}) error
 				"accessorID", accessorIdToAuditMsg(authz.AccessorID()),
 				"error", errorToAuditMsg(err),
 				"ID", args.Service.ID, "name", args.Service.Service,
+				"NodeID", args.Node,
 				"address", args.Service.Address, "port", args.Service.Port,
 				"metaKeys", args.Service.Meta)
 		}
