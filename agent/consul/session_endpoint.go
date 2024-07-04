@@ -55,7 +55,7 @@ func (s *Session) Apply(args *structs.SessionRequest, reply *string) error {
 	var authz resolver.Result
 	var err error
 	defer func() {
-		s.logger.Named("audit").Warn("Session Apply",
+		s.logger.Named("audit").Warn("Session apply",
 			"accessorID", accessorIdToAuditMsg(authz.AccessorID()),
 			"operation", args.Op,
 			"error", errorToAuditMsg(err),
@@ -199,7 +199,7 @@ func (s *Session) Get(args *structs.SessionSpecificRequest,
 	var authz resolver.Result
 	var err error
 	defer func() {
-		s.logger.Named("audit").Warn("Session Get",
+		s.logger.Named("audit").Warn("Session get",
 			"accessorID", accessorIdToAuditMsg(authz.AccessorID()),
 			"error", errorToAuditMsg(err),
 			"sessionID", args.SessionID)
