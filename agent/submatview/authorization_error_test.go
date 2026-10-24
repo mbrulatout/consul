@@ -41,7 +41,7 @@ func TestStore_Get_RecordedAuthorizationError(t *testing.T) {
 					}
 					resultCh := make(chan resultOrError, 1)
 					go func() {
-						result, err := store.Get(ctx, req)
+						result, err := store.Get(observeStoreQueries(store, req, ctx), req)
 						resultCh <- resultOrError{Result: result, Err: err}
 					}()
 					var got resultOrError
@@ -81,7 +81,7 @@ func TestStore_Notify_RecordedAuthorizationError(t *testing.T) {
 					releaseCallback := make(chan struct{})
 					updates := make(chan cache.UpdateEvent, 3)
 					first := true
-					require.NoError(t, store.NotifyCallback(ctx, req, "web", func(_ context.Context, update cache.UpdateEvent) {
+					require.NoError(t, store.NotifyCallback(observeStoreQueries(store, req, ctx), req, "web", func(_ context.Context, update cache.UpdateEvent) {
 						if first {
 							first = false
 							close(callbackEntered)

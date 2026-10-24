@@ -27,6 +27,9 @@ type Store struct {
 	lock   sync.RWMutex
 	byKey  map[string]entry
 
+	ctx  context.Context
+	stop context.CancelFunc
+
 	// expiryHeap tracks entries with 0 remaining requests. Entries are ordered
 	// by most recent expiry first.
 	expiryHeap *ttlcache.ExpiryHeap
@@ -62,7 +65,10 @@ type entry struct {
 // NewStore creates and returns a Store that is ready for use. The caller must
 // call Store.Run (likely in a separate goroutine) to start the expiration loop.
 func NewStore(logger hclog.Logger) *Store {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Store{
+		ctx:        ctx,
+		stop:       cancel,
 		logger:     logger,
 		byKey:      make(map[string]entry),
 		expiryHeap: ttlcache.NewExpiryHeap(),
@@ -72,6 +78,7 @@ func NewStore(logger hclog.Logger) *Store {
 
 // Run the expiration loop until the context is cancelled.
 func (s *Store) Run(ctx context.Context) {
+	defer s.shutdown()
 	for {
 		s.lock.RLock()
 		timer := s.expiryHeap.Next()
@@ -109,6 +116,26 @@ func (s *Store) Run(ctx context.Context) {
 	}
 }
 
+func (s *Store) shutdown() {
+	s.stop()
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	for _, e := range s.byKey {
+		e.stop()
+	}
+	clear(s.byKey)
+	s.expiryHeap = ttlcache.NewExpiryHeap()
+}
+
+func (s *Store) requestContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(s.ctx, cancel)
+	if s.ctx.Err() != nil {
+		cancel()
+	}
+	return ctx, func() { stop(); cancel() }
+}
+
 // Request is used to request data from the Store.
 // Note that cache.Request is required, but some of the fields cache.RequestInfo
 // fields are ignored (ex: MaxAge, and MustRevalidate).
@@ -134,6 +161,8 @@ func (s *Store) Get(ctx context.Context, req Request) (Result, error) {
 		return Result{}, err
 	}
 	defer s.releaseEntry(key)
+	ctx, cancel := s.requestContext(ctx)
+	defer cancel()
 
 	if info.Timeout > 0 {
 		var cancel context.CancelFunc
@@ -142,6 +171,9 @@ func (s *Store) Get(ctx context.Context, req Request) (Result, error) {
 	}
 
 	result, err := materializer.Query(ctx, info.MinIndex)
+	if s.ctx.Err() != nil {
+		return result, context.Canceled
+	}
 	// A timeout is successful only after a complete snapshot has been received.
 	if err == nil || errors.Is(err, context.DeadlineExceeded) && result.Index > 0 {
 		return result, nil
@@ -183,7 +215,9 @@ func (s *Store) NotifyCallback(
 		return err
 	}
 
+	ctx, cancel := s.requestContext(ctx)
 	go func() {
+		defer cancel()
 		defer s.releaseEntry(key)
 
 		index := info.MinIndex
@@ -197,7 +231,7 @@ func (s *Store) NotifyCallback(
 				result, err = materializer.Query(ctx, index)
 			}
 			switch {
-			case ctx.Err() != nil:
+			case ctx.Err() != nil || s.ctx.Err() != nil:
 				return
 			case err != nil:
 				s.logger.Warn("handling error in Store.Notify",
@@ -227,6 +261,9 @@ func (s *Store) readEntry(req Request) (string, Materializer, error) {
 
 	s.lock.Lock()
 	defer s.lock.Unlock()
+	if err := s.ctx.Err(); err != nil {
+		return "", nil, err
+	}
 	e, ok := s.byKey[key]
 	if ok {
 		if e.evicting {
@@ -242,7 +279,7 @@ func (s *Store) readEntry(req Request) (string, Materializer, error) {
 		return "", nil, err
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(s.ctx)
 	go func() {
 		mat.Run(ctx)
 
@@ -278,7 +315,10 @@ func (s *Store) evictNow(key string) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
-	e := s.byKey[key]
+	e, ok := s.byKey[key]
+	if !ok {
+		return
+	}
 	e.evicting = true
 	s.byKey[key] = e
 
@@ -292,7 +332,10 @@ func (s *Store) evictNow(key string) {
 func (s *Store) releaseEntry(key string) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
-	e := s.byKey[key]
+	e, ok := s.byKey[key]
+	if !ok {
+		return
+	}
 	e.requests--
 	s.byKey[key] = e
 

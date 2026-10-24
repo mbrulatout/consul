@@ -297,7 +297,9 @@ func TestStore_Notify(t *testing.T) {
 	defer cancel()
 
 	store := NewStore(hclog.New(nil))
-	go store.Run(ctx)
+	runCtx, stopStore := context.WithCancel(context.Background())
+	defer stopStore()
+	go store.Run(runCtx)
 
 	req := &fakeRPCRequest{
 		client: NewTestStreamingClient(pbcommon.DefaultEnterpriseMeta.Namespace),
@@ -366,7 +368,9 @@ func TestStore_Notify_ManyRequests(t *testing.T) {
 	defer cancel()
 
 	store := NewStore(hclog.New(nil))
-	go store.Run(ctx)
+	runCtx, stopStore := context.WithCancel(context.Background())
+	defer stopStore()
+	go store.Run(runCtx)
 
 	req := &fakeRPCRequest{
 		client: NewTestStreamingClient(pbcommon.DefaultEnterpriseMeta.Namespace),

@@ -41,7 +41,7 @@ func TestStore_Notify_ReplacementSnapshot(t *testing.T) {
 					defer close(ctx.expired)
 					updates := make(chan cache.UpdateEvent, 3)
 					startWatch := func() {
-						require.NoError(t, store.NotifyCallback(ctx, req, "web", func(_ context.Context, update cache.UpdateEvent) {
+						require.NoError(t, store.NotifyCallback(observeStoreQueries(store, req, ctx), req, "web", func(_ context.Context, update cache.UpdateEvent) {
 							select {
 							case updates <- update:
 							case <-ctx.expired:
@@ -154,7 +154,7 @@ func TestStore_Notify_ReplacementDuringCallback(t *testing.T) {
 				releaseCallback := make(chan struct{})
 				updates := make(chan cache.UpdateEvent, 3)
 				first := true
-				require.NoError(t, store.NotifyCallback(ctx, req, "web", func(_ context.Context, update cache.UpdateEvent) {
+				require.NoError(t, store.NotifyCallback(observeStoreQueries(store, req, ctx), req, "web", func(_ context.Context, update cache.UpdateEvent) {
 					if first {
 						first = false
 						close(callbackEntered)

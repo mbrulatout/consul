@@ -92,7 +92,7 @@ func TestLocalMaterializer_NotifyTerminalAuthorizationError(t *testing.T) {
 				expired: make(chan struct{}),
 			}
 			updates := make(chan cache.UpdateEvent, 2)
-			require.NoError(t, store.Notify(ctx, req, "web", updates))
+			require.NoError(t, store.Notify(observeStoreQueries(store, req, ctx), req, "web", updates))
 			defer func() {
 				close(ctx.expired)
 				select {
