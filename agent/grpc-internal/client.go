@@ -317,7 +317,15 @@ func newDialer(cfg ClientConnPoolConfig, gwResolverDep *gatewayResolverDep) func
 				cfg.DialingFromServer,
 				gwResolverDep.GatewayResolver,
 			)
-			return conn, err
+			if err != nil {
+				return conn, err
+			}
+			if t, ok := cfg.Servers.(interface {
+				TrackConn(string, net.Conn) net.Conn
+			}); ok {
+				conn = t.TrackConn(globalAddr, conn)
+			}
+			return conn, nil
 		}
 
 		d := net.Dialer{LocalAddr: cfg.SrcAddr, Timeout: pool.DefaultDialTimeout}

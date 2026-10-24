@@ -135,7 +135,13 @@ func TestNewDialer_WithALPNWrapper(t *testing.T) {
 	ctx := context.Background()
 	conn, err := dial(ctx, resolver.DCPrefix("dc2", lis2.Addr().String()))
 	require.NoError(t, err)
-	require.NoError(t, conn.Close())
+	t.Cleanup(func() { conn.Close() })
+	_, err = conn.Write([]byte{0})
+	require.NoError(t, err)
+
+	builder.RemoveServer(types.AreaWAN, &metadata.Server{ID: "ID2", Datacenter: "dc2"})
+	_, err = conn.Write([]byte{0})
+	require.ErrorIs(t, err, net.ErrClosed, "removing a remote server must close its mesh-gateway connection")
 
 	assert.False(t, calledTLS, "expected TLSWrapper not to be called")
 	assert.True(t, calledALPN, "expected ALPNWrapper to be called")
