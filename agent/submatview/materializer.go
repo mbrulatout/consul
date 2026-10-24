@@ -198,6 +198,17 @@ func (m *materializer) reset() {
 	m.index = 0
 }
 
+// resetFailedView makes recovery observable even when a resumed stream has no new events.
+func (m *materializer) resetFailedView() {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	if m.err != nil {
+		m.view.Reset()
+		m.index = 0
+	}
+}
+
 // updateView updates the view from a sequence of events and stores
 // the corresponding Raft index.
 func (m *materializer) updateView(events []*pbsubscribe.Event, index uint64) error {

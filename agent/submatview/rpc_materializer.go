@@ -67,6 +67,7 @@ func (m *RPCMaterializer) Run(ctx context.Context) {
 		if err := m.mat.retryWaiter.Wait(ctx); err != nil {
 			return
 		}
+		m.mat.resetFailedView()
 	}
 }
 

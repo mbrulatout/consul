@@ -243,13 +243,12 @@ func testHealthView_IntegrationWithStore_WithEmptySnapshot(t *testing.T, peerNam
 		require.True(t, elapsed < time.Second,
 			"Fetch should have returned before the timeout")
 
-		require.Equal(t, req.MinQueryIndex, result.Index, "result index should not have changed")
-		require.Equal(t, lastResultValue, result.Value.(*structs.IndexedCheckServiceNodes).Nodes)
-
-		req.MinQueryIndex = result.Index
-
-		// But an update should still be noticed due to reconnection
-		streamClient.QueueEvents(newEventServiceHealthRegister(req.MinQueryIndex+5, 3, "web", peerName))
+		replacementIndex := req.MinQueryIndex + 5
+		streamClient.QueueEvents(
+			newEventServiceHealthRegister(replacementIndex, 1, "web", peerName),
+			newEventServiceHealthRegister(replacementIndex, 2, "web", peerName),
+			newEventServiceHealthRegister(replacementIndex, 3, "web", peerName),
+			newEndOfSnapshotEvent(replacementIndex))
 
 		req.MaxQueryTime = time.Second
 		retry.RunWith(&retry.Timer{Timeout: time.Second, Wait: time.Millisecond}, t, func(r *retry.R) {
