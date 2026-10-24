@@ -46,8 +46,9 @@ type Result struct {
 	Value interface{}
 	// Cached is true if the requested value was already available locally. If
 	// the value is false, it indicates that GetFromView had to wait for an update,
-	Cached     bool
-	generation uint64
+	Cached       bool
+	generation   uint64
+	errorVersion uint64
 }
 
 type Deps struct {
@@ -65,12 +66,13 @@ type materializer struct {
 
 	// lock protects the mutable state - all fields below it must only be accessed
 	// while holding lock.
-	lock       sync.Mutex
-	index      uint64
-	generation uint64
-	view       View
-	updateCh   chan struct{}
-	err        error
+	lock         sync.Mutex
+	index        uint64
+	generation   uint64
+	view         View
+	updateCh     chan struct{}
+	err          error
+	errorVersion uint64
 }
 
 func newMaterializer(logger hclog.Logger, view View, waiter *retry.Waiter) *materializer {
@@ -96,9 +98,10 @@ func (m *materializer) queryUpdates(ctx context.Context, minIndex uint64, previo
 	m.lock.Lock()
 
 	result := Result{
-		Index:      m.index,
-		Value:      m.view.Result(m.index),
-		generation: m.generation,
+		Index:        m.index,
+		Value:        m.view.Result(m.index),
+		generation:   m.generation,
+		errorVersion: m.errorVersion,
 	}
 
 	updateCh := m.updateCh
@@ -109,12 +112,17 @@ func (m *materializer) queryUpdates(ctx context.Context, minIndex uint64, previo
 	err := m.err
 	m.lock.Unlock()
 
+	if err != nil && (previous == nil || previous.errorVersion != result.errorVersion) {
+		result.Cached = result.Index > 0
+		return result, err
+	}
+
 	// If our index is > req.Index return right away. If index is zero then we
 	// haven't loaded a snapshot at all yet which means we should wait for one on
 	// the update chan.
-	if result.Index > 0 && (result.Index > minIndex || generation > 0 && generation != result.generation) {
+	if err == nil && result.Index > 0 && (result.Index > minIndex || generation > 0 && generation != result.generation) {
 		result.Cached = true
-		return result, err
+		return result, nil
 	}
 
 	for {
@@ -124,13 +132,14 @@ func (m *materializer) queryUpdates(ctx context.Context, minIndex uint64, previo
 			m.lock.Lock()
 			result.Index = m.index
 			result.generation = m.generation
+			result.errorVersion = m.errorVersion
 
 			switch {
-			case m.err != nil:
+			case m.err != nil && (previous == nil || previous.errorVersion != m.errorVersion):
 				err := m.err
 				m.lock.Unlock()
 				return result, err
-			case result.Index == 0 || result.Index <= minIndex && (generation == 0 || generation == m.generation):
+			case m.err != nil || result.Index == 0 || result.Index <= minIndex && (generation == 0 || generation == m.generation):
 				// get a reference to the new updateCh, the previous one was closed
 				updateCh = m.updateCh
 				m.lock.Unlock()
@@ -147,9 +156,14 @@ func (m *materializer) queryUpdates(ctx context.Context, minIndex uint64, previo
 			m.lock.Lock()
 			result.Index = m.index
 			result.generation = m.generation
+			result.errorVersion = m.errorVersion
 			result.Value = m.view.Result(m.index)
+			err := ctx.Err()
+			if m.err != nil && (previous == nil || previous.errorVersion != m.errorVersion) {
+				err = m.err
+			}
 			m.lock.Unlock()
-			return result, ctx.Err()
+			return result, err
 		}
 	}
 }
@@ -168,6 +182,9 @@ func (m *materializer) currentIndex() uint64 {
 // one. It must be called while holding the m.lock lock.
 func (m *materializer) notifyUpdateLocked(err error) {
 	m.err = err
+	if err != nil {
+		m.errorVersion++
+	}
 	close(m.updateCh)
 	m.updateCh = make(chan struct{})
 }

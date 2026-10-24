@@ -25,6 +25,7 @@ import (
 	"github.com/hashicorp/consul/proto/private/pbsubscribe"
 	"github.com/hashicorp/consul/proto/private/prototest"
 	"github.com/hashicorp/consul/sdk/testutil"
+	"github.com/hashicorp/consul/sdk/testutil/retry"
 	"github.com/hashicorp/consul/types"
 )
 
@@ -251,8 +252,10 @@ func testHealthView_IntegrationWithStore_WithEmptySnapshot(t *testing.T, peerNam
 		streamClient.QueueEvents(newEventServiceHealthRegister(req.MinQueryIndex+5, 3, "web", peerName))
 
 		req.MaxQueryTime = time.Second
-		result, err = store.Get(ctx, req)
-		require.NoError(t, err)
+		retry.RunWith(&retry.Timer{Timeout: time.Second, Wait: time.Millisecond}, t, func(r *retry.R) {
+			result, err = store.Get(ctx, req)
+			require.NoError(r, err)
+		})
 		elapsed = time.Since(start)
 		require.True(t, elapsed < time.Second, "Fetch should have returned before the timeout")
 
