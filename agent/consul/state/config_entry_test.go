@@ -3343,6 +3343,10 @@ func TestStore_ValidateServiceIntentionsErrorOnIncompatibleProtocols(t *testing.
 }
 
 func TestStateStore_ConfigEntry_VirtualIP(t *testing.T) {
+	originalBindAddr := netutil.GetAgentBindAddrFunc
+	t.Cleanup(func() { netutil.GetAgentBindAddrFunc = originalBindAddr })
+	netutil.GetAgentBindAddrFunc = netutil.GetMockGetAgentBindAddrFunc("0.0.0.0")
+
 	createServiceInstance := func(t *testing.T, s *Store, name string) {
 		ns1 := &structs.NodeService{
 			ID:      name,

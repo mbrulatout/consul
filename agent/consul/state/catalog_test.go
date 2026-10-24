@@ -40,6 +40,9 @@ func makeRandomNodeID(t *testing.T) types.NodeID {
 }
 
 func TestAddIPOffset(t *testing.T) {
+	originalBindAddr := netutil.GetAgentBindAddrFunc
+	t.Cleanup(func() { netutil.GetAgentBindAddrFunc = originalBindAddr })
+
 	// Test cases for Single-Stack (IPv4) mode
 	t.Run("SingleStackIPv4", func(t *testing.T) {
 		testCases := []struct {
