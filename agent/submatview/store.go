@@ -43,6 +43,10 @@ type Materializer interface {
 	Query(ctx context.Context, minIndex uint64) (Result, error)
 }
 
+type updateQuerier interface {
+	queryUpdates(context.Context, uint64, *Result) (Result, error)
+}
+
 type entry struct {
 	materializer Materializer
 	expiry       *ttlcache.Entry
@@ -183,8 +187,15 @@ func (s *Store) NotifyCallback(
 		defer s.releaseEntry(key)
 
 		index := info.MinIndex
+		var previous *Result
 		for {
-			result, err := materializer.Query(ctx, index)
+			var result Result
+			var err error
+			if querier, ok := materializer.(updateQuerier); ok {
+				result, err = querier.queryUpdates(ctx, index, previous)
+			} else {
+				result, err = materializer.Query(ctx, index)
+			}
 			switch {
 			case ctx.Err() != nil:
 				return
@@ -196,6 +207,7 @@ func (s *Store) NotifyCallback(
 			}
 
 			index = result.Index
+			previous = &result
 			cb(ctx, cache.UpdateEvent{
 				CorrelationID: correlationID,
 				Result:        result.Value,

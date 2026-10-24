@@ -46,6 +46,10 @@ func (m *RPCMaterializer) Query(ctx context.Context, minIndex uint64) (Result, e
 	return m.mat.query(ctx, minIndex)
 }
 
+func (m *RPCMaterializer) queryUpdates(ctx context.Context, minIndex uint64, previous *Result) (Result, error) {
+	return m.mat.queryUpdates(ctx, minIndex, previous)
+}
+
 // Run receives events from the StreamClient and sends them to the View. It runs
 // until ctx is cancelled, so it is expected to be run in a goroutine.
 // Mirrors implementation of LocalMaterializer

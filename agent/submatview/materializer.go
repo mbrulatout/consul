@@ -46,7 +46,8 @@ type Result struct {
 	Value interface{}
 	// Cached is true if the requested value was already available locally. If
 	// the value is false, it indicates that GetFromView had to wait for an update,
-	Cached bool
+	Cached     bool
+	generation uint64
 }
 
 type Deps struct {
@@ -88,22 +89,30 @@ func newMaterializer(logger hclog.Logger, view View, waiter *retry.Waiter) *mate
 // Query blocks until the index advances, a replacement snapshot completes,
 // or the context is cancelled.
 func (m *materializer) query(ctx context.Context, minIndex uint64) (Result, error) {
+	return m.queryUpdates(ctx, minIndex, nil)
+}
+
+func (m *materializer) queryUpdates(ctx context.Context, minIndex uint64, previous *Result) (Result, error) {
 	m.lock.Lock()
 
 	result := Result{
-		Index: m.index,
-		Value: m.view.Result(m.index),
+		Index:      m.index,
+		Value:      m.view.Result(m.index),
+		generation: m.generation,
 	}
 
 	updateCh := m.updateCh
 	generation := m.generation
+	if previous != nil {
+		generation = previous.generation
+	}
 	err := m.err
 	m.lock.Unlock()
 
 	// If our index is > req.Index return right away. If index is zero then we
 	// haven't loaded a snapshot at all yet which means we should wait for one on
 	// the update chan.
-	if result.Index > 0 && result.Index > minIndex {
+	if result.Index > 0 && (result.Index > minIndex || generation > 0 && generation != result.generation) {
 		result.Cached = true
 		return result, err
 	}
@@ -114,6 +123,7 @@ func (m *materializer) query(ctx context.Context, minIndex uint64) (Result, erro
 			// View updated, return the new result
 			m.lock.Lock()
 			result.Index = m.index
+			result.generation = m.generation
 
 			switch {
 			case m.err != nil:
@@ -136,6 +146,7 @@ func (m *materializer) query(ctx context.Context, minIndex uint64) (Result, erro
 			// use the value when the error is context.DeadlineExceeded
 			m.lock.Lock()
 			result.Index = m.index
+			result.generation = m.generation
 			result.Value = m.view.Result(m.index)
 			m.lock.Unlock()
 			return result, ctx.Err()
