@@ -118,6 +118,12 @@ func (m *LocalMaterializer) subscribeOnce(ctx context.Context, req *pbsubscribe.
 	}
 	defer sub.Unsubscribe()
 
+	// Invalidation before registration cannot close this subscription.
+	authz, err = m.deps.ACLResolver.ResolveTokenAndDefaultMeta(req.Token, &entMeta, nil)
+	if err != nil {
+		return err
+	}
+
 	for {
 		event, err := sub.Next(ctx)
 		switch {
