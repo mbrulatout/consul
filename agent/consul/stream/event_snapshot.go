@@ -20,6 +20,7 @@ type eventSnapshot struct {
 	buffer *eventBuffer
 
 	liveStart *bufferLink
+	cacheID   uint64
 }
 
 // newEventSnapshot creates an empty snapshot buffer.

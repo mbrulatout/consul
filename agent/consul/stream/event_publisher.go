@@ -35,7 +35,8 @@ type EventPublisher struct {
 
 	// snapCache if a cache of EventSnapshots indexed by topic and subject.
 	// TODO(streaming): new snapshotCache struct for snapCache and snapCacheTTL
-	snapCache map[topicSubject]*eventSnapshot
+	snapCache           map[topicSubject]*eventSnapshot
+	nextSnapshotCacheID uint64
 
 	subscriptions *subscriptions
 
@@ -473,13 +474,18 @@ func (e *EventPublisher) setCachedSnapshotLocked(req *SubscribeRequest, snap *ev
 	if e.snapCacheTTL == 0 {
 		return
 	}
-	e.snapCache[req.topicSubject()] = snap
+	e.nextSnapshotCacheID++
+	id := e.nextSnapshotCacheID
+	key := req.topicSubject()
+	snap.cacheID = id
+	e.snapCache[key] = snap
 
-	// Setup a cache eviction
 	time.AfterFunc(e.snapCacheTTL, func() {
 		e.lock.Lock()
 		defer e.lock.Unlock()
-		delete(e.snapCache, req.topicSubject())
+		if current := e.snapCache[key]; current != nil && current.cacheID == id {
+			delete(e.snapCache, key)
+		}
 	})
 }
 
