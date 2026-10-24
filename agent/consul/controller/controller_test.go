@@ -109,7 +109,7 @@ func TestBasicController_Transform(t *testing.T) {
 		}}
 	}).Run(ctx)
 
-	require.NoError(t, store.EnsureConfigEntry(1, &structs.IngressGatewayConfigEntry{
+	require.NoError(t, store.EnsureConfigEntry(10, &structs.IngressGatewayConfigEntry{
 		Kind: structs.IngressGateway,
 		Name: "test",
 	}))
@@ -145,7 +145,7 @@ func TestBasicController_Retry(t *testing.T) {
 		StorageBackend: fsm.NullStorageBackend,
 	}).State()
 
-	queueInitialized := make(chan *countingWorkQueue[Request])
+	queueInitialized := make(chan *countingWorkQueue[Request], 1)
 	controller := New(publisher, reconciler).Subscribe(&stream.SubscribeRequest{
 		Topic:   state.EventTopicIngressGateway,
 		Subject: stream.SubjectWildcard,
@@ -156,7 +156,12 @@ func TestBasicController_Retry(t *testing.T) {
 		return queue
 	}).Run(ctx)
 
-	queue := <-queueInitialized
+	var queue *countingWorkQueue[Request]
+	select {
+	case queue = <-queueInitialized:
+	case <-ctx.Done():
+		t.Fatal("controller queue did not initialize before the deadline")
+	}
 
 	ensureCalled := func(request chan Request, name string) bool {
 		// give a short window for our counters to update
@@ -173,14 +178,14 @@ func TestBasicController_Retry(t *testing.T) {
 
 	// check to make sure we are called once
 	queue.reset()
-	require.NoError(t, store.EnsureConfigEntry(1, &structs.IngressGatewayConfigEntry{
+	require.NoError(t, store.EnsureConfigEntry(10, &structs.IngressGatewayConfigEntry{
 		Kind: structs.IngressGateway,
 		Name: "foo-1",
 	}))
 	require.False(t, ensureCalled(reconciler.received, "foo-1"))
 	require.EqualValues(t, 0, queue.dones())
 	require.EqualValues(t, 0, queue.requeues())
-	reconciler.step()
+	require.NoError(t, reconciler.step(ctx))
 	require.True(t, ensureCalled(reconciler.received, "foo-1"))
 	require.EqualValues(t, 1, queue.dones())
 	require.EqualValues(t, 0, queue.requeues())
@@ -188,7 +193,7 @@ func TestBasicController_Retry(t *testing.T) {
 	// check that we requeue when an arbitrary error occurs
 	queue.reset()
 	reconciler.setResponse(errors.New("error"))
-	require.NoError(t, store.EnsureConfigEntry(2, &structs.IngressGatewayConfigEntry{
+	require.NoError(t, store.EnsureConfigEntry(20, &structs.IngressGatewayConfigEntry{
 		Kind: structs.IngressGateway,
 		Name: "foo-2",
 	}))
@@ -196,7 +201,7 @@ func TestBasicController_Retry(t *testing.T) {
 	require.EqualValues(t, 0, queue.dones())
 	require.EqualValues(t, 0, queue.requeues())
 	require.EqualValues(t, 0, queue.addRateLimiteds())
-	reconciler.step()
+	require.NoError(t, reconciler.step(ctx))
 	// check we're processed the first time and re-queued
 	require.True(t, ensureCalled(reconciler.received, "foo-2"))
 	require.EqualValues(t, 1, queue.dones())
@@ -204,7 +209,7 @@ func TestBasicController_Retry(t *testing.T) {
 	require.EqualValues(t, 1, queue.addRateLimiteds())
 	// now make sure we succeed
 	reconciler.setResponse(nil)
-	reconciler.step()
+	require.NoError(t, reconciler.step(ctx))
 	require.True(t, ensureCalled(reconciler.received, "foo-2"))
 	require.EqualValues(t, 2, queue.dones())
 	require.EqualValues(t, 1, queue.requeues())
@@ -213,7 +218,7 @@ func TestBasicController_Retry(t *testing.T) {
 	// check that we requeue at a given rate when using a RequeueAfterError
 	queue.reset()
 	reconciler.setResponse(RequeueNow())
-	require.NoError(t, store.EnsureConfigEntry(3, &structs.IngressGatewayConfigEntry{
+	require.NoError(t, store.EnsureConfigEntry(30, &structs.IngressGatewayConfigEntry{
 		Kind: structs.IngressGateway,
 		Name: "foo-3",
 	}))
@@ -221,7 +226,7 @@ func TestBasicController_Retry(t *testing.T) {
 	require.EqualValues(t, 0, queue.dones())
 	require.EqualValues(t, 0, queue.requeues())
 	require.EqualValues(t, 0, queue.addRateLimiteds())
-	reconciler.step()
+	require.NoError(t, reconciler.step(ctx))
 	// check we're processed the first time and re-queued
 	require.True(t, ensureCalled(reconciler.received, "foo-3"))
 	require.EqualValues(t, 1, queue.dones())
@@ -229,7 +234,7 @@ func TestBasicController_Retry(t *testing.T) {
 	require.EqualValues(t, 1, queue.addAfters())
 	// now make sure we succeed
 	reconciler.setResponse(nil)
-	reconciler.step()
+	require.NoError(t, reconciler.step(ctx))
 	require.True(t, ensureCalled(reconciler.received, "foo-3"))
 	require.EqualValues(t, 2, queue.dones())
 	require.EqualValues(t, 1, queue.requeues())
@@ -550,7 +555,7 @@ func TestDiscoveryChainController(t *testing.T) {
 		}
 	}
 
-	require.NoError(t, store.EnsureConfigEntry(1, &structs.IngressGatewayConfigEntry{
+	require.NoError(t, store.EnsureConfigEntry(10, &structs.IngressGatewayConfigEntry{
 		Kind: structs.IngressGateway,
 		Name: "foo-1",
 	}))
@@ -565,7 +570,7 @@ func TestDiscoveryChainController(t *testing.T) {
 	controller.AddTrigger(request, ws.WatchCtx)
 
 	require.False(t, ensureCalled(reconciler.received, "foo-1"))
-	require.NoError(t, store.EnsureConfigEntry(1, &structs.ServiceResolverConfigEntry{
+	require.NoError(t, store.EnsureConfigEntry(11, &structs.ServiceResolverConfigEntry{
 		Kind: structs.ServiceResolver,
 		Name: "foo-2",
 	}))

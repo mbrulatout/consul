@@ -44,8 +44,13 @@ func (r *testReconciler) setResponse(err error) {
 	r.response = err
 }
 
-func (r *testReconciler) step() {
-	r.stepChan <- struct{}{}
+func (r *testReconciler) step(ctx context.Context) error {
+	select {
+	case r.stepChan <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (r *testReconciler) stepFor(duration time.Duration) {
