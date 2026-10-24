@@ -95,6 +95,7 @@ func (m *materializer) query(ctx context.Context, minIndex uint64) (Result, erro
 	}
 
 	updateCh := m.updateCh
+	err := m.err
 	m.lock.Unlock()
 
 	// If our index is > req.Index return right away. If index is zero then we
@@ -102,7 +103,7 @@ func (m *materializer) query(ctx context.Context, minIndex uint64) (Result, erro
 	// the update chan.
 	if result.Index > 0 && result.Index > minIndex {
 		result.Cached = true
-		return result, nil
+		return result, err
 	}
 
 	for {
