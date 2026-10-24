@@ -97,6 +97,8 @@ func (c *Cache) notifyBlockingQuery(ctx context.Context, r getOptions, correlati
 	// Always start at 0 index to deliver the initial (possibly currently cached
 	// value).
 	index := uint64(0)
+	generation := uint64(0)
+	r.observedGeneration = &generation
 	failures := uint(0)
 
 	for {
@@ -107,6 +109,7 @@ func (c *Cache) notifyBlockingQuery(ctx context.Context, r getOptions, correlati
 
 		// Blocking request
 		r.Info.MinIndex = index
+		previousGeneration := generation
 		res, meta, err := c.getWithIndex(ctx, r)
 
 		// Check context hasn't been canceled
@@ -116,7 +119,7 @@ func (c *Cache) notifyBlockingQuery(ctx context.Context, r getOptions, correlati
 
 		// Check the index of the value returned in the cache entry to be sure it
 		// changed
-		if index == 0 || index < meta.Index {
+		if index == 0 || index < meta.Index || generation != previousGeneration {
 			cb(ctx, UpdateEvent{CorrelationID: correlationID, Result: res, Meta: meta, Err: err})
 
 			// Update index for next request

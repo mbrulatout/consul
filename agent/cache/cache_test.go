@@ -1610,7 +1610,7 @@ func TestCacheReload(t *testing.T) {
 		tEntry, ok := c.types["t1"]
 		require.True(t, ok)
 		keyName := makeEntryKey("t1", "", "", "", "hello1")
-		ok, entryValid, entry := c.getEntryLocked(tEntry, keyName, RequestInfo{})
+		ok, entryValid, entry := c.getEntryLocked(tEntry, keyName, RequestInfo{}, nil)
 		require.True(t, ok)
 		require.True(t, entryValid)
 		doTest(t, entry)

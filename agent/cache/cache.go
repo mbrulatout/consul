@@ -142,6 +142,7 @@ type Cache struct {
 	entriesLock       sync.RWMutex
 	entries           map[string]cacheEntry
 	entriesExpiryHeap *ttlcache.ExpiryHeap
+	lastGeneration    uint64
 
 	fetchLock    sync.Mutex
 	lastFetchID  uint64
@@ -338,9 +339,10 @@ func (c *Cache) Get(ctx context.Context, t string, r Request) (interface{}, Resu
 type getOptions struct {
 	// Fetch is a closure over tEntry.Type.Fetch which provides the original
 	// Request from the caller.
-	Fetch     func(opts FetchOptions) (FetchResult, error)
-	Info      RequestInfo
-	TypeEntry typeEntry
+	Fetch              func(opts FetchOptions) (FetchResult, error)
+	Info               RequestInfo
+	TypeEntry          typeEntry
+	observedGeneration *uint64
 }
 
 func newGetOptions(tEntry typeEntry, r Request) getOptions {
@@ -360,6 +362,7 @@ func (c *Cache) getEntryLocked(
 	tEntry typeEntry,
 	key string,
 	info RequestInfo,
+	observedGeneration *uint64,
 ) (entryExists bool, entryValid bool, entry cacheEntry) {
 	entry, ok := c.entries[key]
 	if !entry.Valid {
@@ -368,7 +371,8 @@ func (c *Cache) getEntryLocked(
 
 	// Check index is not specified or lower than value, or the type doesn't
 	// support blocking.
-	if tEntry.Opts.SupportsBlocking && info.MinIndex > 0 && info.MinIndex >= entry.Index {
+	replaced := observedGeneration != nil && *observedGeneration > 0 && *observedGeneration != entry.generation
+	if tEntry.Opts.SupportsBlocking && info.MinIndex > 0 && info.MinIndex >= entry.Index && !replaced {
 		// MinIndex was given and matches or is higher than current value so we
 		// ignore the cache and fallthrough to blocking on a new value below.
 		return true, false, entry
@@ -425,7 +429,7 @@ func (c *Cache) getWithIndex(ctx context.Context, r getOptions) (interface{}, Re
 RETRY_GET:
 	// Get the current value
 	c.entriesLock.RLock()
-	_, entryValid, entry := c.getEntryLocked(r.TypeEntry, key, r.Info)
+	_, entryValid, entry := c.getEntryLocked(r.TypeEntry, key, r.Info, r.observedGeneration)
 	c.entriesLock.RUnlock()
 
 	if entry.Expiry != nil {
@@ -450,6 +454,9 @@ RETRY_GET:
 	}
 
 	if entryValid {
+		if r.observedGeneration != nil {
+			*r.observedGeneration = entry.generation
+		}
 		meta := ResultMeta{Index: entry.Index}
 		if first {
 			metrics.IncrCounter([]string{"consul", "cache", r.TypeEntry.Name, "hit"}, 1)
@@ -556,7 +563,7 @@ func (c *Cache) fetch(key string, r getOptions, allowNew bool, attempt uint, ign
 	// We acquire a write lock because we may have to set Fetching to true.
 	c.entriesLock.Lock()
 	defer c.entriesLock.Unlock()
-	ok, entryValid, entry := c.getEntryLocked(r.TypeEntry, key, r.Info)
+	ok, entryValid, entry := c.getEntryLocked(r.TypeEntry, key, r.Info, r.observedGeneration)
 
 	// This handles the case where a fetch succeeded after checking for its existence in
 	// getWithIndex. This ensures that we don't miss updates.
@@ -611,6 +618,8 @@ func (c *Cache) fetch(key string, r getOptions, allowNew bool, attempt uint, ign
 	//
 	// By the time we get here the system WANTS to make a replacement fetcher, so
 	// we terminate the prior one and replace it.
+	// Background refresh must not retain a notifier-owned cursor.
+	r.observedGeneration = nil
 	handle := c.getOrReplaceFetchHandle(key)
 	go func(handle fetchHandle) {
 		defer c.deleteFetchHandle(key, handle.id)
@@ -799,6 +808,11 @@ func (c *Cache) fetch(key string, r getOptions, allowNew bool, attempt uint, ign
 			return
 		}
 
+		if newEntry.Valid && (newEntry.generation == 0 || newEntry.Index < entry.Index) {
+			c.lastGeneration++
+			newEntry.generation = c.lastGeneration
+		}
+
 		// If this is a new entry (not in the heap yet), then setup the
 		// initial expiry information and insert. If we're already in
 		// the heap we do nothing since we're reusing the same entry.
@@ -975,6 +989,8 @@ func (c *Cache) Prepopulate(t string, res FetchResult, dc, peerName, token, k st
 		),
 	}
 	c.entriesLock.Lock()
+	c.lastGeneration++
+	newEntry.generation = c.lastGeneration
 	c.entries[key] = newEntry
 	c.entriesLock.Unlock()
 	return nil

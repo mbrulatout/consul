@@ -24,9 +24,10 @@ type cacheEntry struct {
 	// that is not part of the actual IssuedCert struct it returns. It's opaque to
 	// the Cache but allows types to store additional data that is coupled to the
 	// cache entry's lifetime and will be aged out by TTL etc.
-	State interface{}
-	Error error
-	Index uint64
+	State      interface{}
+	Error      error
+	Index      uint64
+	generation uint64
 
 	// Metadata that is used for internal accounting
 	Valid    bool          // True if the Value is set
