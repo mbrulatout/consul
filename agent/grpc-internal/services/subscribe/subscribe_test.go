@@ -919,6 +919,13 @@ node "node1" {
 
 func TestServer_Subscribe_IntegrationWithBackend_ACLUpdate(t *testing.T) {
 	backend := newTestBackend(t)
+	var tokenRevoked atomic.Bool
+	backend.resolveTokenAndDefaultMeta = func(token string, entMeta *acl.EnterpriseMeta, _ *acl.AuthorizerContext) (acl.Authorizer, error) {
+		if tokenRevoked.Load() {
+			return nil, fmt.Errorf("ACL not found")
+		}
+		return backend.authorizer(token, entMeta), nil
+	}
 	addr := runTestServer(t, NewServer(backend, hclog.New(nil)))
 	token := "this-token-is-good"
 
@@ -1009,10 +1016,8 @@ node "node1" {
 
 	go recvEvents(chEvents, streamHandle)
 
-	// Stub out token authn function so that the token is no longer considered valid.
-	backend.resolveTokenAndDefaultMeta = func(t string, entMeta *acl.EnterpriseMeta, _ *acl.AuthorizerContext) (acl.Authorizer, error) {
-		return nil, fmt.Errorf("ACL not found")
-	}
+	require.True(t, getEvent(t, chEvents).GetEndOfSnapshot())
+	tokenRevoked.Store(true)
 
 	testutil.RunStep(t, "invalid token should return an error", func(t *testing.T) {
 		// Force another ACL update.
