@@ -11,6 +11,7 @@ import (
 	"github.com/hashicorp/consul/agent/metadata"
 	"net"
 	"reflect"
+	"sync"
 	"sync/atomic"
 
 	"github.com/armon/go-metrics"
@@ -162,6 +163,7 @@ type Handler struct {
 	globalCfg             *atomic.Pointer[HandlerConfig]
 	ipCfg                 *atomic.Pointer[IPLimitConfig]
 	serversStatusProvider ServersStatusProvider
+	serversStatusLock     sync.RWMutex
 
 	limiter multilimiter.RateLimiter
 
@@ -238,8 +240,11 @@ func (h *Handler) Run(ctx context.Context) {
 // Allow returns an error if the given operation is not allowed to proceed
 // because of an exhausted rate-limit.
 func (h *Handler) Allow(op Operation) error {
+	h.serversStatusLock.RLock()
+	serversStatusProvider := h.serversStatusProvider
+	h.serversStatusLock.RUnlock()
 
-	if h.serversStatusProvider == nil {
+	if serversStatusProvider == nil {
 		h.logger.Error("serversStatusProvider required to be set via Register(). bailing on rate limiter")
 		return nil
 		// TODO: panic and make sure to use the server's recovery handler
@@ -251,7 +256,7 @@ func (h *Handler) Allow(op Operation) error {
 		return nil
 	}
 
-	allow, throttledLimits := h.allowAllLimits(h.limits(op), h.serversStatusProvider.IsServer(string(metadata.GetIP(op.SourceAddr))))
+	allow, throttledLimits := h.allowAllLimits(h.limits(op), serversStatusProvider.IsServer(string(metadata.GetIP(op.SourceAddr))))
 
 	if !allow {
 		for _, l := range throttledLimits {
@@ -279,7 +284,7 @@ func (h *Handler) Allow(op Operation) error {
 			})
 
 			if enforced {
-				if h.serversStatusProvider.IsLeader() && op.Type == OperationTypeWrite {
+				if serversStatusProvider.IsLeader() && op.Type == OperationTypeWrite {
 					return ErrRetryLater
 				}
 				return ErrRetryElsewhere
@@ -308,6 +313,8 @@ func (h *Handler) UpdateConfig(cfg HandlerConfig) {
 }
 
 func (h *Handler) Register(serversStatusProvider ServersStatusProvider) {
+	h.serversStatusLock.Lock()
+	defer h.serversStatusLock.Unlock()
 	h.serversStatusProvider = serversStatusProvider
 }
 
