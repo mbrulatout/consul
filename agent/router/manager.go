@@ -11,6 +11,7 @@ package router
 import (
 	"math/rand"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -328,8 +329,9 @@ func (m *Manager) healthyServer(server *metadata.Server) bool {
 // deregistered.  Before the newly shuffled server list is saved, the new
 // remote endpoint is tested to ensure its responsive.
 func (m *Manager) RebalanceServers() {
-	// Obtain a copy of the current serverList
+	// Published lists must remain immutable while readers and pings are in flight.
 	l := m.getServerList()
+	l.servers = slices.Clone(l.servers)
 
 	// Shuffle servers so we have a chance of picking a new one.
 	l.shuffleServers()
