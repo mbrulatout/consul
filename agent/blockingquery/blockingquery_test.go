@@ -179,19 +179,28 @@ func TestServer_blockingQuery(t *testing.T) {
 			mockFSM.On("DecrementBlockingQueries").Return(uint64(1))
 		})
 
+		oldStore := fsm.GetState()
+		newStore := state.NewStateStore(nil)
 		var calls int
+		fsm.On("GetState").Unset()
+		fsm.On("GetState").Return(func() *state.Store {
+			if calls == 0 {
+				return oldStore
+			}
+			return newStore
+		})
 		fn := func(_ memdb.WatchSet, _ *state.Store) error {
 			if calls == 0 {
 				meta.On("GetIndex").Return(uint64(1))
 
-				fsm.GetState().Abandon()
+				oldStore.Abandon()
 			}
 			calls++
 			return nil
 		}
 		err := Query(fsm, opts, meta, fn)
 		require.NoError(t, err)
-		require.Equal(t, 1, calls)
+		require.Equal(t, 2, calls)
 	})
 
 	t.Run("non-blocking query for item that does not exist", func(t *testing.T) {

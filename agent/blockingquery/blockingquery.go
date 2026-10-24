@@ -207,10 +207,12 @@ func Query(
 			return nil
 		}
 
-		// exit if the state store has been abandoned
 		select {
 		case <-store.AbandonCh():
-			return nil
+			// Restores can roll indexes back; query the replacement as a fresh result.
+			minQueryIndex = 0
+			notFound = false
+			ranOnce = false
 		default:
 		}
 	}
