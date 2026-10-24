@@ -1009,6 +1009,25 @@ func TestCacheGet_expireBackgroudRefresh(t *testing.T) {
 	typ.AssertExpectations(t)
 }
 
+func expireCacheEntry(t *testing.T, c *Cache, key string) {
+	t.Helper()
+	func() {
+		c.entriesLock.Lock()
+		defer c.entriesLock.Unlock()
+		entry, ok := c.entries[key]
+		require.True(t, ok)
+		c.entriesExpiryHeap.Remove(entry.Expiry.Index())
+		entry.Expiry = c.entriesExpiryHeap.Add(key, 0)
+		c.entries[key] = entry
+	}()
+	retry.Run(t, func(r *retry.R) {
+		c.entriesLock.RLock()
+		defer c.entriesLock.RUnlock()
+		_, ok := c.entries[key]
+		require.False(r, ok)
+	})
+}
+
 // Test that entries reset their TTL on Get
 func TestCacheGet_expireResetGet(t *testing.T) {
 	if testing.Short() {
@@ -1019,10 +1038,11 @@ func TestCacheGet_expireResetGet(t *testing.T) {
 
 	typ := &MockType{}
 	typ.On("RegisterOptions").Return(RegisterOptions{
-		LastGetTTL: 150 * time.Millisecond,
+		LastGetTTL: time.Hour,
 	})
 	defer typ.AssertExpectations(t)
 	c := New(Options{})
+	defer c.Close()
 
 	// Register the type with a timeout
 	c.RegisterType("t", typ)
@@ -1037,11 +1057,11 @@ func TestCacheGet_expireResetGet(t *testing.T) {
 	require.Equal(t, 42, result)
 	require.False(t, meta.Hit)
 
-	// Fetch multiple times, where the total time is well beyond
-	// the TTL. We should not trigger any fetches during this time.
+	key := makeEntryKey("t", "", "", "", "hello")
 	for i := 0; i < 5; i++ {
-		// Sleep a bit
-		time.Sleep(50 * time.Millisecond)
+		c.entriesLock.Lock()
+		sentinel := c.entriesExpiryHeap.Add("sentinel", time.Hour)
+		c.entriesLock.Unlock()
 
 		// Get, should not fetch
 		req = TestRequest(t, RequestInfo{Key: "hello"})
@@ -1049,9 +1069,19 @@ func TestCacheGet_expireResetGet(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, 42, result)
 		require.True(t, meta.Hit)
+
+		// A touched entry must expire after a deadline added since its last Get.
+		func() {
+			c.entriesLock.Lock()
+			defer c.entriesLock.Unlock()
+			timer := c.entriesExpiryHeap.Next()
+			defer timer.Stop()
+			require.Equal(t, "sentinel", timer.Entry.Key())
+			c.entriesExpiryHeap.Remove(sentinel.Index())
+		}()
 	}
 
-	time.Sleep(200 * time.Millisecond)
+	expireCacheEntry(t, c, key)
 
 	// Get, should fetch
 	req = TestRequest(t, RequestInfo{Key: "hello"})
@@ -1059,11 +1089,6 @@ func TestCacheGet_expireResetGet(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 42, result)
 	require.False(t, meta.Hit)
-
-	// Sleep a tiny bit just to let maybe some background calls happen
-	// then verify that we still only got the one call
-	time.Sleep(20 * time.Millisecond)
-	typ.AssertExpectations(t)
 }
 
 // Test that entries reset their TTL on Get even when the value isn't changing
@@ -1417,10 +1442,11 @@ func TestCacheGet_nonRefreshAge(t *testing.T) {
 	typ := &MockType{}
 	typ.On("RegisterOptions").Return(RegisterOptions{
 		Refresh:    false,
-		LastGetTTL: 100 * time.Millisecond,
+		LastGetTTL: time.Hour,
 	})
 	defer typ.AssertExpectations(t)
 	c := New(Options{})
+	defer c.Close()
 	c.RegisterType("t", typ)
 
 	// Configure the type
@@ -1454,8 +1480,7 @@ func TestCacheGet_nonRefreshAge(t *testing.T) {
 		lastAge = meta.Age
 	}
 
-	// Wait for expiry
-	time.Sleep(200 * time.Millisecond)
+	expireCacheEntry(t, c, makeEntryKey("t", "", "", "", "hello"))
 
 	{
 		result, meta, err := c.Get(context.Background(), "t", TestRequest(t, RequestInfo{Key: "hello"}))
