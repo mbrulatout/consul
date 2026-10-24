@@ -51,6 +51,7 @@ func TestEventPublisher_SubscribeWithIndex0(t *testing.T) {
 
 	events := []Event{{
 		Topic:   testTopic,
+		Index:   2,
 		Payload: simplePayload{key: "sub-key", value: "the-published-event-payload"},
 	}}
 	publisher.Publish(events)
@@ -59,6 +60,7 @@ func TestEventPublisher_SubscribeWithIndex0(t *testing.T) {
 	next = getNextEvent(t, eventCh)
 	expected := Event{
 		Topic:   testTopic,
+		Index:   2,
 		Payload: simplePayload{key: "sub-key", value: "the-published-event-payload"},
 	}
 	require.Equal(t, expected, next)
@@ -69,6 +71,95 @@ func TestEventPublisher_SubscribeWithIndex0(t *testing.T) {
 		Payload: simplePayload{key: "other-key", value: "this-should-not-reach-the-subscriber"},
 	}})
 	assertNoResult(t, eventCh)
+}
+
+func TestEventPublisher_SnapshotSkipsQueuedUpdates(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		empty      bool
+		cached     bool
+		startIndex uint64
+	}{
+		{name: "empty snapshot", empty: true},
+		{name: "snapshot with multiple items"},
+		{name: "cached snapshot", cached: true},
+		{name: "reset from a higher index", startIndex: 99},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			publisher := NewEventPublisher(time.Minute)
+			event := func(index uint64, value string) Event {
+				return Event{
+					Topic:   testTopic,
+					Index:   index,
+					Payload: simplePayload{key: "sub-key", value: value},
+				}
+			}
+			snapshot := []Event{event(12, "snapshot-a"), event(12, "snapshot-b")}
+			if tc.empty {
+				snapshot = nil
+			}
+			require.NoError(t, publisher.RegisterHandler(testTopic, func(_ SubscribeRequest, buf SnapshotAppender) (uint64, error) {
+				for _, e := range snapshot {
+					buf.Append([]Event{e})
+				}
+				return 12, nil
+			}, false))
+
+			// Committed state can be ahead of the asynchronous publisher.
+			publisher.Publish([]Event{event(11, "obsolete-a")})
+			publisher.Publish([]Event{event(12, "obsolete-b")})
+			live := []Event{event(13, "live-a"), event(13, "live-b")}
+			publisher.Publish(live)
+
+			if tc.cached {
+				prime, err := publisher.Subscribe(&SubscribeRequest{Topic: testTopic, Subject: StringSubject("sub-key")})
+				require.NoError(t, err)
+				defer prime.Unsubscribe()
+				publisher.snapshotHandlers[testTopic] = func(SubscribeRequest, SnapshotAppender) (uint64, error) {
+					return 0, fmt.Errorf("snapshot should have been cached")
+				}
+			}
+			sub, err := publisher.Subscribe(&SubscribeRequest{
+				Topic: testTopic, Subject: StringSubject("sub-key"), Index: tc.startIndex,
+			})
+			require.NoError(t, err)
+			defer sub.Unsubscribe()
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				publisher.Run(ctx)
+			}()
+			defer func() {
+				cancel()
+				<-done
+			}()
+
+			if tc.startIndex > 0 {
+				e, err := sub.Next(ctx)
+				require.NoError(t, err)
+				require.True(t, e.IsNewSnapshotToFollow())
+			}
+			for _, want := range snapshot {
+				got, err := sub.Next(ctx)
+				require.NoError(t, err)
+				require.Equal(t, want, got)
+			}
+			e, err := sub.Next(ctx)
+			require.NoError(t, err)
+			require.True(t, e.IsEndOfSnapshot())
+			require.Equal(t, uint64(12), e.Index)
+
+			e, err = sub.Next(ctx)
+			require.NoError(t, err)
+			require.Equal(t, uint64(13), e.Index, "updates already represented by the snapshot must be skipped")
+			batch, ok := e.Payload.(*PayloadEvents)
+			require.True(t, ok)
+			require.Equal(t, live, batch.Items)
+		})
+	}
 }
 
 var testSnapshotEvent = Event{

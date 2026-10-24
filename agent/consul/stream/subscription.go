@@ -61,6 +61,9 @@ type Subscription struct {
 	// is mutated by calls to Next.
 	currentItem *bufferItem
 
+	// Committed updates may still be queued when their snapshot is delivered.
+	snapshotIndex uint64
+
 	// closed is a channel which is closed when the subscription is closed. It
 	// is used to exit the blocking select.
 	closed chan struct{}
@@ -131,7 +134,13 @@ func (s *Subscription) Next(ctx context.Context) (Event, error) {
 		if len(next.Events) == 0 {
 			continue
 		}
-		return newEventFromBatch(s.req, next.Events), nil
+		event := newEventFromBatch(s.req, next.Events)
+		if event.IsEndOfSnapshot() {
+			s.snapshotIndex = event.Index
+		} else if s.snapshotIndex > 0 && event.Index <= s.snapshotIndex {
+			continue
+		}
+		return event, nil
 	}
 }
 
