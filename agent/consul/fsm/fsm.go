@@ -289,8 +289,8 @@ func (c *FSM) Restore(old io.ReadCloser) error {
 	c.state = stateNew
 	c.statePtr.Store(stateNew)
 
-	// Subscribe serializes snapshot construction with refresh under the publisher lock.
-	// Publish the replacement first so no old snapshot can survive the refresh.
+	// Publish the replacement before fencing snapshot jobs, so a new-generation
+	// job cannot read the retired state.
 	if c.deps.Publisher != nil {
 		c.deps.Publisher.RefreshAllTopics()
 	}

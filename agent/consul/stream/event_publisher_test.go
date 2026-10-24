@@ -629,6 +629,13 @@ func TestEventPublisher_Unsubscribe_FreesResourcesWhenThereAreNoSubscribers(t *t
 
 	sub1, err := publisher.Subscribe(req)
 	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = sub1.Next(ctx)
+	require.NoError(t, err)
+	event, err := sub1.Next(ctx)
+	require.NoError(t, err)
+	require.True(t, event.IsEndOfSnapshot())
 
 	// Expect a topic buffer and snapshot to have been created.
 	publisher.lock.Lock()
@@ -670,6 +677,7 @@ func simulateExistingSubscriber(t *testing.T, p *EventPublisher, r *SubscribeReq
 	sub, err := p.Subscribe(r)
 	require.NoError(t, err)
 	t.Cleanup(sub.Unsubscribe)
+	snapshotTestEnd(t, sub)
 
 	p.lock.Lock()
 	delete(p.snapCache, r.topicSubject())

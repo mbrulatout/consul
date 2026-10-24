@@ -117,6 +117,8 @@ func (h *Server) Subscribe(req *pbsubscribe.SubscribeRequest, serverStream pbsub
 				return status.Error(codes.Aborted, err.Error())
 			case errors.Is(context.Cause(ctx), errNoLeaderContact):
 				return status.Error(codes.Unavailable, errNoLeaderContact.Error())
+			case errors.Is(err, stream.ErrSnapshotFailed):
+				return status.Error(codes.Internal, stream.ErrSnapshotFailed.Error())
 			case err != nil:
 				return err
 			}

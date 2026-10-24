@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"runtime"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -38,6 +37,13 @@ func TestFSM_RestoreConcurrentSubscription(t *testing.T) {
 	topic := stream.StringSubject("restore-lock-order")
 	snapshotStarted := make(chan struct{})
 	continueSnapshot := make(chan struct{})
+	defer func() {
+		select {
+		case <-continueSnapshot:
+		default:
+			close(continueSnapshot)
+		}
+	}()
 	var calls atomic.Int32
 	require.NoError(t, publisher.RegisterHandler(topic, func(_ stream.SubscribeRequest, _ stream.SnapshotAppender) (uint64, error) {
 		if calls.Add(1) == 2 {
@@ -72,13 +78,6 @@ func TestFSM_RestoreConcurrentSubscription(t *testing.T) {
 
 	restored := make(chan error, 1)
 	go func() { restored <- fsm.Restore(sink) }()
-	// Pause snapshot construction until restore reaches the publisher lock.
-	require.Eventually(t, func() bool {
-		stacks := make([]byte, 1<<20)
-		n := runtime.Stack(stacks, true)
-		return strings.Contains(string(stacks[:n]), "(*EventPublisher).RefreshAllTopics")
-	}, 5*time.Second, time.Millisecond)
-	close(continueSnapshot)
 
 	select {
 	case err := <-restored:
@@ -88,6 +87,7 @@ func TestFSM_RestoreConcurrentSubscription(t *testing.T) {
 		n := runtime.Stack(stacks, true)
 		t.Fatalf("restore and subscription deadlocked:\n%s", stacks[:n])
 	}
+	close(continueSnapshot)
 	result := <-subscribed
 	require.NoError(t, result.err)
 	defer result.sub.Unsubscribe()

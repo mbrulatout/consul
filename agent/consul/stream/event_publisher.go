@@ -38,6 +38,11 @@ type EventPublisher struct {
 	snapCache           map[topicSubject]*eventSnapshot
 	nextSnapshotCacheID uint64
 
+	snapshotJobs               map[topicSubject]*snapshotJob
+	snapshotHead, snapshotTail *snapshotJob
+	snapshotWorkerRunning      bool
+	stopped                    bool
+
 	subscriptions *subscriptions
 
 	// publishCh is used to send messages from an active txn to a goroutine which
@@ -120,6 +125,7 @@ func NewEventPublisher(snapCacheTTL time.Duration) *EventPublisher {
 		subscriptions: &subscriptions{
 			byToken: make(map[string]map[*SubscribeRequest]*Subscription),
 		},
+		snapshotJobs:     make(map[topicSubject]*snapshotJob),
 		snapshotHandlers: make(map[Topic]SnapshotFunc),
 		wildcards:        make(map[Topic]topicSubject),
 	}
@@ -217,6 +223,12 @@ func (e *EventPublisher) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			e.lock.Lock()
+			e.stopped = true
+			for _, job := range e.snapshotJobs {
+				e.retireSnapshotJobLocked(job, ErrShuttingDown)
+			}
+			e.lock.Unlock()
 			e.subscriptions.closeAll()
 			return
 		case update := <-e.publishCh:
@@ -312,6 +324,9 @@ func (e *EventPublisher) Subscribe(req *SubscribeRequest) (*Subscription, error)
 	e.lock.Lock()
 	defer e.lock.Unlock()
 
+	if e.stopped {
+		return nil, ErrShuttingDown
+	}
 	handler, ok := e.snapshotHandlers[req.Topic]
 	if !ok || req.Topic == nil {
 		return nil, fmt.Errorf("unknown topic %v", req.Topic)
@@ -334,10 +349,12 @@ func (e *EventPublisher) Subscribe(req *SubscribeRequest) (*Subscription, error)
 	// counter is inconsistent with the subscription map) — in practice this is
 	// fine, we don't need these things to be strongly consistent. The alternative
 	// would be to hold both locks, which introduces the risk of deadlocks.
+	var job *snapshotJob
 	freeBuf := func() {
 		e.lock.Lock()
 		defer e.lock.Unlock()
 
+		e.releaseSnapshotJobLocked(job)
 		topicBuf.refs--
 
 		if topicBuf.refs == 0 && e.topicBuffers[req.topicSubject()] == topicBuf {
@@ -363,14 +380,7 @@ func (e *EventPublisher) Subscribe(req *SubscribeRequest) (*Subscription, error)
 		return e.subscriptions.add(req, subscriptionHead, freeBuf), nil
 	}
 
-	snapFromCache := e.getCachedSnapshotLocked(req)
-	if snapFromCache == nil {
-		snap := newEventSnapshot()
-		snap.liveStart = topicHead.link
-		snap.appendAndSplice(*req, handler, topicHead)
-		e.setCachedSnapshotLocked(req, snap)
-		snapFromCache = snap
-	}
+	snapFromCache, job := e.snapshotForSubscriptionLocked(req, topicBuf, handler)
 
 	// If the request.Index is 0 the client has no view, send a full snapshot.
 	if req.Index == 0 {
@@ -492,6 +502,11 @@ func (e *EventPublisher) setCachedSnapshotLocked(req *SubscribeRequest, snap *ev
 // forceEvictByTopicLocked will remove all entries from the snapshot cache for a given topic.
 // This method should be called while holding the EventPublisher's lock.
 func (e *EventPublisher) forceEvictByTopicLocked(topic Topic) {
+	for key, job := range e.snapshotJobs {
+		if key.Topic == topic.String() {
+			e.retireSnapshotJobLocked(job, ErrSubForceClosed)
+		}
+	}
 	for key := range e.snapCache {
 		if key.Topic == topic.String() {
 			delete(e.snapCache, key)

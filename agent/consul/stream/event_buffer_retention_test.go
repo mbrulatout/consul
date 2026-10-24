@@ -175,9 +175,6 @@ func TestEventPublisher_RetentionPreservesSnapshotFloor(t *testing.T) {
 	publish := func(index uint64) {
 		publisher.publishEvent(eventBatch{events: []Event{{Topic: testTopic, Index: index, Payload: simplePayload{key: "key", value: "queued"}}}})
 	}
-	for index := uint64(95); index < 100; index++ {
-		publish(index)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	_, err = sub.Next(ctx)
@@ -185,6 +182,9 @@ func TestEventPublisher_RetentionPreservesSnapshotFloor(t *testing.T) {
 	event, err := sub.Next(ctx)
 	require.NoError(t, err)
 	require.True(t, event.IsEndOfSnapshot())
+	for index := uint64(95); index < 100; index++ {
+		publish(index)
+	}
 	_, err = sub.Next(ctx)
 	require.ErrorIs(t, err, ErrSubForceClosed)
 

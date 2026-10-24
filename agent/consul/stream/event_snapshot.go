@@ -41,6 +41,10 @@ func (s *eventSnapshot) appendAndSplice(req SubscribeRequest, fn SnapshotFunc, t
 		s.buffer.AppendItem(&bufferItem{Err: err})
 		return
 	}
+	s.complete(req, idx, topicBufferHead)
+}
+
+func (s *eventSnapshot) complete(req SubscribeRequest, idx uint64, topicBufferHead *bufferItem) {
 	// If the SnapshotFunc returned a zero index but no error, it is likely because
 	// the resource doesn't exist yet. We don't want to surface this to subscribers
 	// though, because some (e.g. submatview.Materializer) assume zero isn't valid
@@ -67,18 +71,18 @@ func (s *eventSnapshot) spliceFromTopicBuffer(topicBufferHead *bufferItem, idx u
 	for {
 		switch {
 		case item.Err != nil:
-			// This case is not currently possible because errors can only come
-			// from a snapshot func, and this is consuming events from a topic
-			// buffer which does not contain a snapshot.
-			// Handle this case anyway in case errors can come from other places
-			// in the future.
 			s.buffer.AppendItem(item)
 			return
 
 		case len(item.Events) > 0 && item.Events[0].Index > idx:
+			if next, ok := item.NextNoBlock(); ok && next.Err != nil {
+				s.buffer.AppendItem(next)
+				return
+			}
 			// We've found an update in the topic buffer that happened after our
 			// snapshot was taken, splice it into the snapshot buffer so subscribers
 			// can continue to read this and others after it.
+			s.liveStart = item.link
 			s.buffer.AppendItem(item)
 			return
 		}
@@ -88,6 +92,7 @@ func (s *eventSnapshot) spliceFromTopicBuffer(topicBufferHead *bufferItem, idx u
 			// We reached the head of the topic buffer. We don't want any of the
 			// events in the topic buffer as they came before the snapshot.
 			// Append a link to any future items.
+			s.liveStart = next.link
 			s.buffer.AppendItem(next)
 			return
 		}
