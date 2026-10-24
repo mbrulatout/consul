@@ -101,6 +101,8 @@ func (c *Client) Notify(
 
 func (c *Client) useStreaming(req structs.ServiceSpecificRequest) bool {
 	return c.UseStreamingBackend &&
+		// Materialized snapshots cannot verify leadership for an individual read.
+		!req.RequireConsistent &&
 		!req.Ingress &&
 		// Streaming is incompatible with NearestN queries (due to lack of ordering),
 		// so we can only use it if the NearestN would never work (Node == "")

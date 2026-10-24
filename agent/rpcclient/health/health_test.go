@@ -69,6 +69,14 @@ func TestClient_ServiceNodes_BackendRouting(t *testing.T) {
 			expected: useStreaming,
 		},
 		{
+			name: "rpc for consistent blocking query",
+			req: structs.ServiceSpecificRequest{
+				Datacenter: "dc1", ServiceName: "web1",
+				QueryOptions: structs.QueryOptions{MinQueryIndex: 22, RequireConsistent: true},
+			},
+			expected: useRPC,
+		},
+		{
 			name: "use cache for ingress request",
 			req: structs.ServiceSpecificRequest{
 				Datacenter:   "dc1",
@@ -238,6 +246,14 @@ func TestClient_Notify_BackendRouting(t *testing.T) {
 				ServiceName: "web1",
 			},
 			expected: useStreaming,
+		},
+		{
+			name: "use cache for consistent request",
+			req: structs.ServiceSpecificRequest{
+				Datacenter: "dc1", ServiceName: "web1",
+				QueryOptions: structs.QueryOptions{RequireConsistent: true},
+			},
+			expected: useCache,
 		},
 		{
 			name: "use cache for ingress request",
