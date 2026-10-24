@@ -92,6 +92,12 @@ func (h *Server) Subscribe(req *pbsubscribe.SubscribeRequest, serverStream pbsub
 	}
 	defer sub.Unsubscribe()
 
+	// Invalidation before registration cannot close this subscription.
+	authz, err = h.Backend.ResolveTokenAndDefaultMeta(req.Token, &entMeta, nil)
+	if err != nil {
+		return err
+	}
+
 	elog := &eventLogger{logger: logger}
 	for {
 		event, err := sub.Next(ctx)
