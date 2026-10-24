@@ -15,6 +15,7 @@ import (
 	"github.com/hashicorp/consul/acl"
 	"github.com/hashicorp/consul/agent/consul/state"
 	"github.com/hashicorp/consul/agent/consul/stream"
+	agentmiddleware "github.com/hashicorp/consul/agent/grpc-middleware"
 	"github.com/hashicorp/consul/agent/structs"
 	"github.com/hashicorp/consul/proto/private/pbsubscribe"
 )
@@ -73,7 +74,8 @@ func (h *Server) Subscribe(req *pbsubscribe.SubscribeRequest, serverStream pbsub
 	}
 
 	ctx := serverStream.Context()
-	if lc, ok := h.Backend.(leaderContacter); ok {
+	lc, watchLeader := h.Backend.(leaderContacter)
+	if watchLeader {
 		fresh := lc.LeaderContact()
 		if fresh.Err() != nil {
 			return status.Error(codes.Unavailable, errNoLeaderContact.Error())
@@ -81,7 +83,6 @@ func (h *Server) Subscribe(req *pbsubscribe.SubscribeRequest, serverStream pbsub
 		var cancel context.CancelCauseFunc
 		ctx, cancel = context.WithCancelCause(ctx)
 		defer cancel(nil)
-		// Runs nothing until fresh is canceled: no goroutine per stream.
 		stop := context.AfterFunc(fresh, func() { cancel(errNoLeaderContact) })
 		defer stop()
 	}
@@ -98,38 +99,69 @@ func (h *Server) Subscribe(req *pbsubscribe.SubscribeRequest, serverStream pbsub
 		return err
 	}
 
-	elog := &eventLogger{logger: logger}
-	for {
-		event, err := sub.Next(ctx)
-		switch {
-		case errors.Is(err, stream.ErrSubForceClosed):
-			logger.Trace("subscription reset by server")
-			return status.Error(codes.Aborted, err.Error())
-		case errors.Is(err, stream.ErrACLChanged):
-			logger.Trace("ACL change occurred; re-authenticating")
-			_, authzErr := h.Backend.ResolveTokenAndDefaultMeta(req.Token, &entMeta, nil)
-			if authzErr != nil {
-				return authzErr
+	sendEvents := func() error {
+		elog := &eventLogger{logger: logger}
+		for {
+			event, err := sub.Next(ctx)
+			switch {
+			case errors.Is(err, stream.ErrSubForceClosed):
+				logger.Trace("subscription reset by server")
+				return status.Error(codes.Aborted, err.Error())
+			case errors.Is(err, stream.ErrACLChanged):
+				logger.Trace("ACL change occurred; re-authenticating")
+				_, authzErr := h.Backend.ResolveTokenAndDefaultMeta(req.Token, &entMeta, nil)
+				if authzErr != nil {
+					return authzErr
+				}
+				// Otherwise, abort the stream so the client re-subscribes.
+				return status.Error(codes.Aborted, err.Error())
+			case errors.Is(context.Cause(ctx), errNoLeaderContact):
+				return status.Error(codes.Unavailable, errNoLeaderContact.Error())
+			case err != nil:
+				return err
 			}
-			// Otherwise, abort the stream so the client re-subscribes.
-			return status.Error(codes.Aborted, err.Error())
-		case errors.Is(context.Cause(ctx), errNoLeaderContact):
+
+			if !event.Payload.HasReadPermission(authz) {
+				continue
+			}
+
+			elog.Trace(event)
+
+			// TODO: This conversion could be cached if needed
+			e := event.Payload.ToSubscriptionEvent(event.Index)
+			if err := serverStream.Send(e); err != nil {
+				return err
+			}
+		}
+	}
+	if !watchLeader {
+		return sendEvents()
+	}
+
+	// Returning the handler cancels gRPC's transport context, which interrupts
+	// Send even when client flow control has stopped delivery.
+	result := make(chan error, 1)
+	go func() {
+		var err error
+		panicked := true
+		defer func() {
+			// The server's recovery interceptor runs on the handler goroutine.
+			if p := recover(); p != nil || panicked {
+				err = agentmiddleware.NewPanicHandler(logger.With())(p)
+			}
+			result <- err
+		}()
+		err = sendEvents()
+		panicked = false
+	}()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		if errors.Is(context.Cause(ctx), errNoLeaderContact) {
 			return status.Error(codes.Unavailable, errNoLeaderContact.Error())
-		case err != nil:
-			return err
 		}
-
-		if !event.Payload.HasReadPermission(authz) {
-			continue
-		}
-
-		elog.Trace(event)
-
-		// TODO: This conversion could be cached if needed
-		e := event.Payload.ToSubscriptionEvent(event.Index)
-		if err := serverStream.Send(e); err != nil {
-			return err
-		}
+		return ctx.Err()
 	}
 }
 
