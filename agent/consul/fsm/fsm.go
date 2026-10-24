@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
@@ -57,12 +57,9 @@ type FSM struct {
 	// operations to their appropriate handlers.
 	apply map[structs.MessageType]command
 
-	// stateLock is only used to protect outside callers to State() from
-	// racing with Restore(), which is called by Raft (it puts in a totally
-	// new state store). Everything internal here is synchronized by the
-	// Raft side, so doesn't need to lock this.
-	stateLock sync.RWMutex
-	state     *state.Store
+	// Raft owns state; external readers must not lock while building publisher snapshots.
+	state    *state.Store
+	statePtr atomic.Pointer[state.Store]
 
 	publisher *stream.EventPublisher
 }
@@ -137,6 +134,8 @@ func NewFromDeps(deps Deps) *FSM {
 		state:  deps.NewStateStore(),
 	}
 
+	fsm.statePtr.Store(fsm.state)
+
 	// Build out the apply dispatch table based on the registered commands.
 	for msg, fn := range commands {
 		thisFn := fn
@@ -161,9 +160,7 @@ func (c *FSM) ChunkingFSM() raft.FSM {
 
 // State is used to return a handle to the current state
 func (c *FSM) State() *state.Store {
-	c.stateLock.RLock()
-	defer c.stateLock.RUnlock()
-	return c.state
+	return c.statePtr.Load()
 }
 
 func (c *FSM) Apply(log *raft.Log) interface{} {
@@ -288,25 +285,15 @@ func (c *FSM) Restore(old io.ReadCloser) error {
 	}
 	storageRestoration.Commit()
 
-	// External code might be calling State(), so we need to synchronize
-	// here to make sure we swap in the new state store atomically.
-	c.stateLock.Lock()
 	stateOld := c.state
 	c.state = stateNew
+	c.statePtr.Store(stateNew)
 
-	// Tell the EventPublisher to cycle anything watching these topics. Replacement
-	// of the state store means that indexes could have gone backwards and data changed.
-	//
-	// This needs to happen while holding the state lock to ensure its not racey. If we
-	// did this outside of the locked section closer to where we abandon the old store
-	// then there would be a possibility for new streams to be opened that would get
-	// a snapshot from the cache sourced from old data but would be receiving events
-	// for new data. To prevent that inconsistency we refresh the topics while holding
-	// the lock which ensures that any subscriptions to topics for FSM generated events
+	// Subscribe serializes snapshot construction with refresh under the publisher lock.
+	// Publish the replacement first so no old snapshot can survive the refresh.
 	if c.deps.Publisher != nil {
 		c.deps.Publisher.RefreshAllTopics()
 	}
-	c.stateLock.Unlock()
 
 	// Signal that the old state store has been abandoned. This is required
 	// because we don't operate on it any more, we just throw it away, so
