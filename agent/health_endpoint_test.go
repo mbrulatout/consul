@@ -1256,7 +1256,7 @@ func TestHealthServiceNodes_NodeMetaFilter(t *testing.T) {
 			})
 
 			testutil.RunStep(t, "do blocking read", func(t *testing.T) {
-				u := fmt.Sprintf("/v1/health/service/test?dc=dc1&node-meta=%s&index=%d&wait=100ms&cached", encodedMeta, lastIndex)
+				u := fmt.Sprintf("/v1/health/service/test?dc=dc1&node-meta=%s&index=%d&wait=5s&cached", encodedMeta, lastIndex)
 
 				req, err := http.NewRequest("GET", u, nil)
 				require.NoError(t, err)
