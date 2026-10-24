@@ -247,6 +247,21 @@ func (s *HTTPHandlers) healthServiceNodes(resp http.ResponseWriter, req *http.Re
 	out.ConsistencyLevel = args.ConsistencyLevel()
 	_ = setMeta(resp, &out.QueryMeta)
 
+	// Cached results share nested data with other readers.
+	out.Nodes = out.Nodes.ShallowClone()
+	translateWAN := s.agent.config.TranslateWANAddrs && s.agent.config.Datacenter != args.Datacenter
+	for i := range out.Nodes {
+		if translateWAN {
+			clone := *out.Nodes[i].Node
+			out.Nodes[i].Node = &clone
+		}
+		service := out.Nodes[i].Service
+		if service != nil && (translateWAN || service.Tags == nil || (service.Port == 0 && len(service.Ports) > 0)) {
+			clone := *service
+			out.Nodes[i].Service = &clone
+		}
+	}
+
 	// Translate addresses after filtering so we don't waste effort.
 	s.agent.TranslateAddresses(args.Datacenter, out.Nodes, dnsutil.TranslateAddressAcceptAny)
 
@@ -258,17 +273,20 @@ func (s *HTTPHandlers) healthServiceNodes(resp http.ResponseWriter, req *http.Re
 		if out.Nodes[i].Checks == nil {
 			out.Nodes[i].Checks = make(structs.HealthChecks, 0)
 		}
+		checksCloned := false
 		for j, c := range out.Nodes[i].Checks {
 			if c.ServiceTags == nil {
+				if !checksCloned {
+					out.Nodes[i].Checks = append(structs.HealthChecks(nil), out.Nodes[i].Checks...)
+					checksCloned = true
+				}
 				clone := *c
 				clone.ServiceTags = make([]string, 0)
 				out.Nodes[i].Checks[j] = &clone
 			}
 		}
 		if out.Nodes[i].Service != nil && out.Nodes[i].Service.Tags == nil {
-			clone := *out.Nodes[i].Service
-			clone.Tags = make([]string, 0)
-			out.Nodes[i].Service = &clone
+			out.Nodes[i].Service.Tags = make([]string, 0)
 		}
 
 		if out.Nodes[i].Service != nil && out.Nodes[i].Service.Port == 0 && len(out.Nodes[i].Service.Ports) > 0 {
