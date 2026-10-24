@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
+	"sync"
 
 	"github.com/hashicorp/consul/api"
 )
@@ -24,9 +26,18 @@ var GetAgentConfigFunc = GetAgentConfig
 var GetAgentBindAddrFunc = GetAgentBindAddr
 
 var cachedBindAddr net.IP
+var cachedBindAddrLock sync.RWMutex
 
 func SetAgentBindAddr(ip *net.IPAddr) {
-	cachedBindAddr = ip.IP
+	cachedBindAddrLock.Lock()
+	defer cachedBindAddrLock.Unlock()
+	cachedBindAddr = slices.Clone(ip.IP)
+}
+
+func getCachedBindAddr() net.IP {
+	cachedBindAddrLock.RLock()
+	defer cachedBindAddrLock.RUnlock()
+	return slices.Clone(cachedBindAddr)
 }
 
 func GetMockGetAgentBindAddrFunc(ip string) func(config *api.Config, cached bool) (net.IP, error) {
@@ -59,8 +70,10 @@ func GetAgentConfig(config *api.Config) (map[string]map[string]interface{}, erro
 
 // GetAgentBindAddr retrieves the bind address from the agent's configuration.
 func GetAgentBindAddr(config *api.Config, cached bool) (net.IP, error) {
-	if cachedBindAddr != nil && cached {
-		return cachedBindAddr, nil
+	if cached {
+		if ip := getCachedBindAddr(); ip != nil {
+			return ip, nil
+		}
 	}
 	agentConfig, err := GetAgentConfigFunc(config)
 	if err != nil {
@@ -76,8 +89,9 @@ func GetAgentBindAddr(config *api.Config, cached bool) (net.IP, error) {
 	if err != nil {
 		return nil, err
 	}
-	cachedBindAddr = ip.AsSlice()
-	return cachedBindAddr, nil
+	bindIP := net.IP(ip.AsSlice())
+	SetAgentBindAddr(&net.IPAddr{IP: bindIP})
+	return bindIP, nil
 }
 
 func IsDualStack(config *api.Config, cached bool) (bool, error) {
@@ -117,8 +131,10 @@ func GetAgentConfigWithDTO(req *IPStackRequestDTO) (map[string]map[string]interf
 
 // GetAgentBindAddrDTO retrieves the bind address from the agent's configuration.
 func GetAgentBindAddrWithDTO(req *IPStackRequestDTO) (net.IP, error) {
-	if cachedBindAddr != nil && req.Cached {
-		return cachedBindAddr, nil
+	if req.Cached {
+		if ip := getCachedBindAddr(); ip != nil {
+			return ip, nil
+		}
 	}
 	agentConfig, err := GetAgentConfigWithDTO(req)
 	if err != nil {
@@ -134,8 +150,9 @@ func GetAgentBindAddrWithDTO(req *IPStackRequestDTO) (net.IP, error) {
 	if err != nil {
 		return nil, err
 	}
-	cachedBindAddr = ip.AsSlice()
-	return cachedBindAddr, nil
+	bindIP := net.IP(ip.AsSlice())
+	SetAgentBindAddr(&net.IPAddr{IP: bindIP})
+	return bindIP, nil
 }
 
 // IsDualStack checks if the agent is configured to use both IPv4 and IPv6 addresses.
