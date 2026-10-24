@@ -115,6 +115,17 @@ func newSubscription(req SubscribeRequest, item *bufferItem, unsub func()) *Subs
 	}
 }
 
+// Done is closed when the subscription is closed for any reason.
+func (s *Subscription) Done() <-chan struct{} {
+	return s.closed
+}
+
+// Err returns the closure reason, or nil while open. It is safe to call
+// concurrently with Next and Unsubscribe.
+func (s *Subscription) Err() error {
+	return s.requireStateOpen()
+}
+
 // Next returns the next Event to deliver. It must only be called from a
 // single goroutine concurrently as it mutates the Subscription.
 func (s *Subscription) Next(ctx context.Context) (Event, error) {

@@ -99,27 +99,36 @@ func (h *Server) Subscribe(req *pbsubscribe.SubscribeRequest, serverStream pbsub
 		return err
 	}
 
+	subscriptionError := func(err error) error {
+		switch {
+		case errors.Is(err, stream.ErrSubForceClosed):
+			logger.Trace("subscription reset by server")
+			return status.Error(codes.Aborted, err.Error())
+		case errors.Is(err, stream.ErrACLChanged):
+			logger.Trace("ACL change occurred; re-authenticating")
+			_, authzErr := h.Backend.ResolveTokenAndDefaultMeta(req.Token, &entMeta, nil)
+			if authzErr != nil {
+				return authzErr
+			}
+			// Otherwise, abort the stream so the client re-subscribes.
+			return status.Error(codes.Aborted, err.Error())
+		case errors.Is(context.Cause(ctx), errNoLeaderContact):
+			return status.Error(codes.Unavailable, errNoLeaderContact.Error())
+		case errors.Is(err, stream.ErrSnapshotFailed):
+			return status.Error(codes.Internal, stream.ErrSnapshotFailed.Error())
+		default:
+			return err
+		}
+	}
+
 	sendEvents := func() error {
 		elog := &eventLogger{logger: logger}
 		for {
 			event, err := sub.Next(ctx)
-			switch {
-			case errors.Is(err, stream.ErrSubForceClosed):
-				logger.Trace("subscription reset by server")
-				return status.Error(codes.Aborted, err.Error())
-			case errors.Is(err, stream.ErrACLChanged):
-				logger.Trace("ACL change occurred; re-authenticating")
-				_, authzErr := h.Backend.ResolveTokenAndDefaultMeta(req.Token, &entMeta, nil)
-				if authzErr != nil {
-					return authzErr
-				}
-				// Otherwise, abort the stream so the client re-subscribes.
-				return status.Error(codes.Aborted, err.Error())
-			case errors.Is(context.Cause(ctx), errNoLeaderContact):
-				return status.Error(codes.Unavailable, errNoLeaderContact.Error())
-			case errors.Is(err, stream.ErrSnapshotFailed):
-				return status.Error(codes.Internal, stream.ErrSnapshotFailed.Error())
-			case err != nil:
+			if err != nil {
+				return err
+			}
+			if err := ctx.Err(); err != nil {
 				return err
 			}
 
@@ -136,10 +145,6 @@ func (h *Server) Subscribe(req *pbsubscribe.SubscribeRequest, serverStream pbsub
 			}
 		}
 	}
-	if !watchLeader {
-		return sendEvents()
-	}
-
 	// Returning the handler cancels gRPC's transport context, which interrupts
 	// Send even when client flow control has stopped delivery.
 	result := make(chan error, 1)
@@ -158,12 +163,11 @@ func (h *Server) Subscribe(req *pbsubscribe.SubscribeRequest, serverStream pbsub
 	}()
 	select {
 	case err := <-result:
-		return err
+		return subscriptionError(err)
+	case <-sub.Done():
+		return subscriptionError(sub.Err())
 	case <-ctx.Done():
-		if errors.Is(context.Cause(ctx), errNoLeaderContact) {
-			return status.Error(codes.Unavailable, errNoLeaderContact.Error())
-		}
-		return ctx.Err()
+		return subscriptionError(ctx.Err())
 	}
 }
 
