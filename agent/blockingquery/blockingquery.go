@@ -180,6 +180,19 @@ func Query(
 		err := query(ws, store)
 		fsmServer.SetQueryMeta(responseMeta, requestOpts.GetToken())
 
+		// A restore can complete while the query reads its predecessor store.
+		select {
+		case <-store.AbandonCh():
+			if ctx.Err() != nil {
+				return nil
+			}
+			minQueryIndex = 0
+			notFound = false
+			ranOnce = false
+			continue
+		default:
+		}
+
 		switch {
 		case errors.Is(err, ErrNotFound):
 			if notFound {
