@@ -64,11 +64,12 @@ type materializer struct {
 
 	// lock protects the mutable state - all fields below it must only be accessed
 	// while holding lock.
-	lock     sync.Mutex
-	index    uint64
-	view     View
-	updateCh chan struct{}
-	err      error
+	lock       sync.Mutex
+	index      uint64
+	generation uint64
+	view       View
+	updateCh   chan struct{}
+	err        error
 }
 
 func newMaterializer(logger hclog.Logger, view View, waiter *retry.Waiter) *materializer {
@@ -84,7 +85,7 @@ func newMaterializer(logger hclog.Logger, view View, waiter *retry.Waiter) *mate
 	return &m
 }
 
-// Query blocks until the index of the View is greater than opts.MinIndex,
+// Query blocks until the index advances, a replacement snapshot completes,
 // or the context is cancelled.
 func (m *materializer) query(ctx context.Context, minIndex uint64) (Result, error) {
 	m.lock.Lock()
@@ -95,6 +96,7 @@ func (m *materializer) query(ctx context.Context, minIndex uint64) (Result, erro
 	}
 
 	updateCh := m.updateCh
+	generation := m.generation
 	err := m.err
 	m.lock.Unlock()
 
@@ -118,7 +120,7 @@ func (m *materializer) query(ctx context.Context, minIndex uint64) (Result, erro
 				err := m.err
 				m.lock.Unlock()
 				return result, err
-			case result.Index <= minIndex:
+			case result.Index == 0 || result.Index <= minIndex && (generation == 0 || generation == m.generation):
 				// get a reference to the new updateCh, the previous one was closed
 				updateCh = m.updateCh
 				m.lock.Unlock()
@@ -178,6 +180,10 @@ func (m *materializer) updateView(events []*pbsubscribe.Event, index uint64) err
 		return err
 	}
 
+	// Replacement snapshots can change ACL-filtered data without advancing the index.
+	if m.index == 0 {
+		m.generation++
+	}
 	m.index = index
 	m.notifyUpdateLocked(nil)
 	m.retryWaiter.Reset()
