@@ -8,63 +8,27 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
+	"weak"
 )
 
-// eventBuffer is a single-writer, multiple-reader, unlimited length concurrent
-// buffer of events that have been published on a topic. The buffer is
-// effectively just the head of an atomically updated single-linked list. Atomic
-// accesses are usually to be suspected as premature optimization but this
-// specific design has several important features that significantly simplify a
-// lot of our PubSub machinery.
+// eventBuffer is a single-writer, multiple-reader linked buffer. Snapshots use
+// unlimited buffers so every snapshot event survives until delivery. Live topic
+// buffers bound their retained transaction history; readers that fall behind
+// must reset their view and subscribe again.
 //
-// The eventBuffer only tracks the most recent set of published events, so
-// if there are no consumers, older events are automatically garbage collected.
-// Consumers are notified of new events by closing a channel on the previous head
-// allowing efficient broadcast to many watchers without having to run multiple
-// goroutines or deliver to O(N) separate channels.
-//
-// Because eventBuffer is a linked list with atomically updated pointers, readers don't
-// have to take a lock and can consume at their own pace. We also don't need a
-// fixed limit on the number of items, which avoids needing to configure
-// buffer length to balance wasting memory, against being able to tolerate
-// occasionally slow readers.
-//
-// The buffer is used to deliver all messages broadcast to a topic for active
-// subscribers to consume, but it is also an effective way to both deliver and
-// optionally cache snapshots per topic and key. By using an eventBuffer,
-// snapshot functions don't have to read the whole snapshot into memory before
-// delivery - they can stream from memdb. However simply by storing a pointer to
-// the first event in the buffer, we can cache the buffered events for future
-// watchers on the same topic. Finally, once we've delivered all the snapshot
-// events to the buffer, we can append a next-element which is the first topic
-// buffer element with a higher index and so consumers can keep reading the
-// same buffer to have subsequent updates streamed after the snapshot is read.
-//
-// A huge benefit here is that caching snapshots becomes very simple - we don't
-// have to do any additional book-keeping to figure out when to truncate the
-// topic buffer to make sure the snapshot is still usable or run into issues
-// where the cached snapshot is no longer useful since the buffer will keep
-// elements around only as long as either the cache or a subscriber need them.
-// So we can use whatever simple timeout logic we like to decide how long to
-// keep caches (or if we should keep them at all) and the buffers will
-// automatically keep the events we need to make that work for exactly the
-// optimal amount of time and no longer.
-//
-// A new buffer is constructed with a sentinel "empty" bufferItem that has a nil
-// Events array. This enables subscribers to start watching for the next update
-// immediately.
-//
-// The zero value eventBuffer is _not_ usable, as it has not been
-// initialized with an empty bufferItem so can not be used to wait for the first
-// published event. Call newEventBuffer to construct a new buffer.
-//
-// Calls to Append or AppendBuffer that mutate the head must be externally
-// synchronized. This allows systems that already serialize writes to append
-// without lock overhead (e.g. a snapshot goroutine appending thousands of
-// events).
+// Appends must be externally synchronized. Readers follow atomic next pointers
+// and wait on immutable channels without taking the publisher lock.
 type eventBuffer struct {
 	head atomic.Value
+
+	retention int
+
+	// Weak slots let healthy streams release payloads before the window fills.
+	retainedLinks []weak.Pointer[bufferLink]
+	nextLink      int
 }
+
+var expiredBufferItem = &bufferItem{Err: ErrSubForceClosed}
 
 // newEventBuffer creates an eventBuffer ready for use.
 func newEventBuffer() *eventBuffer {
@@ -93,7 +57,7 @@ func (b *eventBuffer) Append(events []Event) {
 //
 // AppendBuffer only supports a single concurrent caller and must be externally
 // synchronized with other Append, AppendBuffer or AppendErr calls.
-func (b *eventBuffer) AppendItem(item *bufferItem) {
+func (b *eventBuffer) AppendItem(item *bufferItem) *bufferLink {
 	// First store it as the next node for the old head this ensures once it's
 	// visible to new searchers the linked list is already valid. Not sure it
 	// matters but this seems nicer.
@@ -104,6 +68,27 @@ func (b *eventBuffer) AppendItem(item *bufferItem) {
 	// Now it's added invalidate the oldHead to notify waiters
 	close(oldHead.link.ch)
 	// don't set chan to nil since that will race with readers accessing it.
+	if b.retention == 0 {
+		return nil
+	}
+	if len(b.retainedLinks) < b.retention {
+		if len(b.retainedLinks) == cap(b.retainedLinks) {
+			links := make([]weak.Pointer[bufferLink], len(b.retainedLinks), min(max(1, 2*len(b.retainedLinks)), b.retention))
+			copy(links, b.retainedLinks)
+			b.retainedLinks = links
+		}
+		b.retainedLinks = append(b.retainedLinks, weak.Make(oldHead.link))
+		return nil
+	}
+
+	expired := b.retainedLinks[b.nextLink].Value()
+	if expired != nil {
+		// Closing a subscription alone leaves blocked readers retaining the suffix.
+		expired.next.Store(expiredBufferItem)
+	}
+	b.retainedLinks[b.nextLink] = weak.Make(oldHead.link)
+	b.nextLink = (b.nextLink + 1) % len(b.retainedLinks)
+	return expired
 }
 
 // Head returns the current head of the buffer. It will always exist but it may
@@ -122,7 +107,7 @@ func (b *eventBuffer) Head() *bufferItem {
 // To iterate to the next event, a Next method may be called which may block if
 // there is no next element yet.
 //
-// Holding a pointer to the item keeps all the events published since in memory
+// Holding a pointer keeps subsequent events until their links are truncated
 // so it's important that subscribers don't hold pointers to buffer items after
 // they have been delivered except where it's intentional to maintain a cache or
 // trailing store of events for performance reasons.
@@ -150,9 +135,8 @@ type bufferItem struct {
 }
 
 type bufferLink struct {
-	// next is an atomically updated pointer to the next event in the buffer. It
-	// is written exactly once by the single published and will always be set if
-	// ch is closed.
+	// next is set before ch closes. Bounded buffers may replace it with a
+	// terminal error when the reader falls outside the retention window.
 	next atomic.Value
 
 	// ch is closed when the next event is published. It should never be mutated

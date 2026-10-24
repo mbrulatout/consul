@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const defaultEventBufferCapacity = 4096
+
 // EventPublisher receives change events from Publish, and sends the events to
 // all subscribers of the event Topic.
 type EventPublisher struct {
@@ -257,7 +259,11 @@ func (e *EventPublisher) publishEvent(batch eventBatch) {
 		// given topic and subject, in which case events will be dropped on the floor and
 		// future subscribers will catch up by consuming the snapshot.
 		if buf := e.bufferForPublishing(groupKey); buf != nil {
-			buf.Append(events)
+			if expired := buf.AppendItem(newBufferItem(events)); expired != nil {
+				if snap := e.snapCache[groupKey]; snap != nil && snap.liveStart == expired {
+					delete(e.snapCache, groupKey)
+				}
+			}
 		}
 	}
 }
@@ -273,6 +279,7 @@ func (e *EventPublisher) bufferForSubscription(key topicSubject) *topicBuffer {
 		buf = &topicBuffer{
 			buf: newEventBuffer(),
 		}
+		buf.buf.retention = defaultEventBufferCapacity
 		e.topicBuffers[key] = buf
 	}
 
@@ -358,6 +365,7 @@ func (e *EventPublisher) Subscribe(req *SubscribeRequest) (*Subscription, error)
 	snapFromCache := e.getCachedSnapshotLocked(req)
 	if snapFromCache == nil {
 		snap := newEventSnapshot()
+		snap.liveStart = topicHead.link
 		snap.appendAndSplice(*req, handler, topicHead)
 		e.setCachedSnapshotLocked(req, snap)
 		snapFromCache = snap

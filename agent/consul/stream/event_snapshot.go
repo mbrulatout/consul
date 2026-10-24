@@ -18,6 +18,8 @@ type eventSnapshot struct {
 
 	// buffer is the Head of the snapshot buffer the fn should write to.
 	buffer *eventBuffer
+
+	liveStart *bufferLink
 }
 
 // newEventSnapshot creates an empty snapshot buffer.
