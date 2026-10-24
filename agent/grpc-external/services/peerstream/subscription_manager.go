@@ -343,6 +343,9 @@ func (m *subscriptionManager) notifyRootCAUpdatesForPartition(
 		// Typically, this function will block inside `m.subscribeCARoots` and only return on error.
 		// Errors are logged and the watch is retried.
 		idx, err = m.subscribeCARoots(ctx, idx, updateCh, partition)
+		if errors.Is(err, stream.ErrShuttingDown) {
+			return
+		}
 		if errors.Is(err, stream.ErrSubForceClosed) {
 			m.logger.Trace("subscription force-closed due to an ACL change or snapshot restore, will attempt resume")
 		} else if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
