@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -39,13 +40,21 @@ type EventPublisher struct {
 	// publishCh is used to send messages from an active txn to a goroutine which
 	// publishes events, so that publishing can happen asynchronously from
 	// the Commit call in the FSM hot path.
-	publishCh chan []Event
+	publishCh chan eventBatch
+
+	// A restored store may reuse lower indexes while older batches are still queued.
+	generation atomic.Uint64
 
 	snapshotHandlers SnapshotHandlers
 
 	// wildcards contains map keys used to access the buffer for a topic's wildcard
 	// subject — it is used to track which topics support wildcard subscriptions.
 	wildcards map[Topic]topicSubject
+}
+
+type eventBatch struct {
+	events     []Event
+	generation uint64
 }
 
 // topicSubject is used as a map key when accessing topic buffers and cached
@@ -104,7 +113,7 @@ func NewEventPublisher(snapCacheTTL time.Duration) *EventPublisher {
 		snapCacheTTL: snapCacheTTL,
 		topicBuffers: make(map[topicSubject]*topicBuffer),
 		snapCache:    make(map[topicSubject]*eventSnapshot),
-		publishCh:    make(chan []Event, 64),
+		publishCh:    make(chan eventBatch, 64),
 		subscriptions: &subscriptions{
 			byToken: make(map[string]map[*SubscribeRequest]*Subscription),
 		},
@@ -148,6 +157,8 @@ func (e *EventPublisher) RefreshAllTopics() {
 	topics := make(map[Topic]struct{})
 
 	e.lock.Lock()
+	e.generation.Add(1)
+	clear(e.topicBuffers)
 	for topic := range e.snapshotHandlers {
 		topics[topic] = struct{}{}
 		e.forceEvictByTopicLocked(topic)
@@ -183,6 +194,7 @@ func (e *EventPublisher) Publish(events []Event) {
 		return
 	}
 
+	batch := eventBatch{events: events, generation: e.generation.Load()}
 	for idx, event := range events {
 		if _, ok := event.Payload.(closeSubscriptionPayload); ok {
 			continue
@@ -193,7 +205,7 @@ func (e *EventPublisher) Publish(events []Event) {
 		}
 	}
 
-	e.publishCh <- events
+	e.publishCh <- batch
 }
 
 // Run the event publisher until ctx is cancelled. Run should be called from a
@@ -212,9 +224,15 @@ func (e *EventPublisher) Run(ctx context.Context) {
 
 // publishEvent appends the events to any applicable topic buffers. It handles
 // any closeSubscriptionPayload events by closing associated subscriptions.
-func (e *EventPublisher) publishEvent(events []Event) {
+func (e *EventPublisher) publishEvent(batch eventBatch) {
+	e.lock.Lock()
+	defer e.lock.Unlock()
+	if batch.generation != e.generation.Load() {
+		return
+	}
+
 	groupedEvents := make(map[topicSubject][]Event)
-	for _, event := range events {
+	for _, event := range batch.events {
 		if unsubEvent, ok := event.Payload.(closeSubscriptionPayload); ok {
 			e.subscriptions.closeSubscriptionsForTokens(unsubEvent.tokensSecretIDs)
 			continue
@@ -228,16 +246,12 @@ func (e *EventPublisher) publishEvent(events []Event) {
 
 		// If the topic supports wildcard subscribers, copy the events to a wildcard
 		// buffer too.
-		e.lock.Lock()
 		wildcard, ok := e.wildcards[event.Topic]
-		e.lock.Unlock()
 		if ok {
 			groupedEvents[wildcard] = append(groupedEvents[wildcard], event)
 		}
 	}
 
-	e.lock.Lock()
-	defer e.lock.Unlock()
 	for groupKey, events := range groupedEvents {
 		// Note: bufferForPublishing returns nil if there are no subscribers for the
 		// given topic and subject, in which case events will be dropped on the floor and
@@ -318,7 +332,7 @@ func (e *EventPublisher) Subscribe(req *SubscribeRequest) (*Subscription, error)
 
 		topicBuf.refs--
 
-		if topicBuf.refs == 0 {
+		if topicBuf.refs == 0 && e.topicBuffers[req.topicSubject()] == topicBuf {
 			delete(e.topicBuffers, req.topicSubject())
 
 			// Evict cached snapshot too because the topic buffer will have been spliced

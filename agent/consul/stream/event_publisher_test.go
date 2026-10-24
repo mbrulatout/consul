@@ -349,7 +349,7 @@ func TestEventPublisher_SubscribeWithIndexNotZero_CanResume(t *testing.T) {
 
 	// Publish the testSnapshotEvent, to ensure that it is skipped over when
 	// splicing the topic buffer onto the snapshot.
-	publisher.publishEvent([]Event{testSnapshotEvent})
+	publisher.publishEvent(eventBatch{events: []Event{testSnapshotEvent}})
 
 	testutil.RunStep(t, "start a subscription and unsub", func(t *testing.T) {
 		sub, err := publisher.Subscribe(req)
@@ -380,7 +380,7 @@ func TestEventPublisher_SubscribeWithIndexNotZero_CanResume(t *testing.T) {
 			Index:   3,
 			Payload: simplePayload{key: "sub-key", value: "event-3"},
 		}
-		publisher.publishEvent([]Event{expected})
+		publisher.publishEvent(eventBatch{events: []Event{expected}})
 
 		next := getNextEvent(t, eventCh)
 		require.Equal(t, expected, next)
@@ -399,7 +399,7 @@ func TestEventPublisher_SubscribeWithIndexNotZero_NewSnapshot(t *testing.T) {
 	registerTestSnapshotHandlers(t, publisher)
 	go publisher.Run(ctx)
 	// Include the same event in the topicBuffer
-	publisher.publishEvent([]Event{testSnapshotEvent})
+	publisher.publishEvent(eventBatch{events: []Event{testSnapshotEvent}})
 
 	testutil.RunStep(t, "start a subscription and unsub", func(t *testing.T) {
 		sub, err := publisher.Subscribe(req)
@@ -423,7 +423,7 @@ func TestEventPublisher_SubscribeWithIndexNotZero_NewSnapshot(t *testing.T) {
 	}
 
 	testutil.RunStep(t, "publish an event while unsubed", func(t *testing.T) {
-		publisher.publishEvent([]Event{nextEvent})
+		publisher.publishEvent(eventBatch{events: []Event{nextEvent}})
 	})
 
 	testutil.RunStep(t, "resume the subscription", func(t *testing.T) {
@@ -460,7 +460,7 @@ func TestEventPublisher_SubscribeWithIndexNotZero_NewSnapshotFromCache(t *testin
 
 	// Publish the testSnapshotEvent, to ensure that it is skipped over when
 	// splicing the topic buffer onto the snapshot.
-	publisher.publishEvent([]Event{testSnapshotEvent})
+	publisher.publishEvent(eventBatch{events: []Event{testSnapshotEvent}})
 
 	testutil.RunStep(t, "start a subscription and unsub", func(t *testing.T) {
 		sub, err := publisher.Subscribe(req)
@@ -484,7 +484,7 @@ func TestEventPublisher_SubscribeWithIndexNotZero_NewSnapshotFromCache(t *testin
 	}
 
 	testutil.RunStep(t, "publish an event while unsubed", func(t *testing.T) {
-		publisher.publishEvent([]Event{nextEvent})
+		publisher.publishEvent(eventBatch{events: []Event{nextEvent}})
 	})
 
 	publisher.lock.Lock()
@@ -548,8 +548,8 @@ func TestEventPublisher_SubscribeWithIndexNotZero_NewSnapshot_WithCache(t *testi
 
 	// Publish the events, to ensure they are is skipped over when splicing the
 	// topic buffer onto the snapshot.
-	publisher.publishEvent([]Event{testSnapshotEvent})
-	publisher.publishEvent([]Event{nextEvent})
+	publisher.publishEvent(eventBatch{events: []Event{testSnapshotEvent}})
+	publisher.publishEvent(eventBatch{events: []Event{nextEvent}})
 
 	testutil.RunStep(t, "start a subscription and unsub", func(t *testing.T) {
 		sub, err := publisher.Subscribe(req)
@@ -796,4 +796,100 @@ func TestEventPublisher_SnapshotIndex0(t *testing.T) {
 
 	// Even though the snapshot handler returned 0, the subscriber shouldn't see it.
 	require.Equal(t, uint64(1), event.Index)
+}
+
+func TestEventPublisher_RefreshAllTopicsIsolatesGenerations(t *testing.T) {
+	for _, mode := range []string{"retained buffer", "queued update", "dequeued update", "queued ACL invalidation"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			publisher := NewEventPublisher(time.Minute)
+			index := uint64(40)
+			require.NoError(t, publisher.RegisterHandler(testTopic, func(_ SubscribeRequest, buf SnapshotAppender) (uint64, error) {
+				buf.Append([]Event{Event{Topic: testTopic, Index: index, Payload: simplePayload{key: "web"}}})
+				return index, nil
+			}, false))
+			request := func() *SubscribeRequest {
+				return &SubscribeRequest{Topic: testTopic, Subject: StringSubject("web"), Token: "token"}
+			}
+			old, err := publisher.Subscribe(request())
+			require.NoError(t, err)
+			defer old.Unsubscribe()
+			_, err = old.Next(ctx)
+			require.NoError(t, err)
+			_, err = old.Next(ctx)
+			require.NoError(t, err)
+
+			if mode == "queued ACL invalidation" {
+				publisher.Publish([]Event{NewCloseSubscriptionEvent([]string{"token"})})
+			} else {
+				publisher.Publish([]Event{Event{Topic: testTopic, Index: 41, Payload: simplePayload{key: "web"}}})
+			}
+			if mode == "retained buffer" {
+				publisher.publishEvent(<-publisher.publishCh)
+			}
+			// A dequeued batch can still be waiting for the publisher lock at restore.
+			var publishOld func()
+			if mode == "dequeued update" {
+				batch := <-publisher.publishCh
+				publishOld = func() { publisher.publishEvent(batch) }
+			}
+			index = 20
+			publisher.RefreshAllTopics()
+			_, err = old.Next(ctx)
+			require.ErrorIs(t, err, ErrSubForceClosed)
+
+			fresh, err := publisher.Subscribe(request())
+			require.NoError(t, err)
+			defer fresh.Unsubscribe()
+			event, err := fresh.Next(ctx)
+			require.NoError(t, err)
+			require.Equal(t, uint64(20), event.Index)
+			event, err = fresh.Next(ctx)
+			require.NoError(t, err)
+			require.True(t, event.IsEndOfSnapshot())
+			require.Equal(t, uint64(20), event.Index)
+
+			// Cleanup from the retired generation must not detach the new stream.
+			old.Unsubscribe()
+			if publishOld != nil {
+				publishOld()
+			} else if mode != "retained buffer" {
+				publisher.publishEvent(<-publisher.publishCh)
+			}
+			publisher.Publish([]Event{Event{Topic: testTopic, Index: 21, Payload: simplePayload{key: "web"}}})
+			publisher.publishEvent(<-publisher.publishCh)
+			event, err = fresh.Next(ctx)
+			require.NoError(t, err)
+			require.Equal(t, Event{Topic: testTopic, Index: 21, Payload: simplePayload{key: "web"}}, event,
+				"a restored stream must receive only the replacement generation")
+		})
+	}
+}
+
+func TestEventPublisher_RefreshTopicPreservesQueuedUpdates(t *testing.T) {
+	publisher := NewEventPublisher(time.Minute)
+	require.NoError(t, publisher.RegisterHandler(testTopic, func(_ SubscribeRequest, _ SnapshotAppender) (uint64, error) {
+		return 20, nil
+	}, false))
+	request := func() *SubscribeRequest {
+		return &SubscribeRequest{Topic: testTopic, Subject: StringSubject("web")}
+	}
+	old, err := publisher.Subscribe(request())
+	require.NoError(t, err)
+	defer old.Unsubscribe()
+	publisher.Publish([]Event{Event{Topic: testTopic, Index: 21, Payload: simplePayload{key: "web"}}})
+	require.NoError(t, publisher.RefreshTopic(testTopic))
+	fresh, err := publisher.Subscribe(request())
+	require.NoError(t, err)
+	defer fresh.Unsubscribe()
+	publisher.publishEvent(<-publisher.publishCh)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	event, err := fresh.Next(ctx)
+	require.NoError(t, err)
+	require.True(t, event.IsEndOfSnapshot())
+	event, err = fresh.Next(ctx)
+	require.NoError(t, err)
+	require.Equal(t, Event{Topic: testTopic, Index: 21, Payload: simplePayload{key: "web"}}, event)
 }
