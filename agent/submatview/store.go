@@ -138,9 +138,8 @@ func (s *Store) Get(ctx context.Context, req Request) (Result, error) {
 	}
 
 	result, err := materializer.Query(ctx, info.MinIndex)
-	// context.DeadlineExceeded is translated to nil to match the timeout
-	// behaviour of agent/cache.Cache.Get.
-	if err == nil || errors.Is(err, context.DeadlineExceeded) {
+	// A timeout is successful only after a complete snapshot has been received.
+	if err == nil || errors.Is(err, context.DeadlineExceeded) && result.Index > 0 {
 		return result, nil
 	}
 	return result, err

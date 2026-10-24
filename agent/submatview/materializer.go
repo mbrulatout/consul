@@ -132,6 +132,7 @@ func (m *materializer) query(ctx context.Context, minIndex uint64) (Result, erro
 			// Update the result value to the latest because callers may still
 			// use the value when the error is context.DeadlineExceeded
 			m.lock.Lock()
+			result.Index = m.index
 			result.Value = m.view.Result(m.index)
 			m.lock.Unlock()
 			return result, ctx.Err()
